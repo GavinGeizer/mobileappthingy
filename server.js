@@ -41,7 +41,7 @@ const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
  */
 async function analyzeImage(imageUrl) {
   const response = await openai.responses.create({
-    model: "gpt-4.1-mini",
+    model: "gpt-5.4",
     input: [
       {
         role: "user",
