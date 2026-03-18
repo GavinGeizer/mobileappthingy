@@ -1,0 +1,20 @@
+{
+  "manifest_version": 3,
+  "name": "Server 3",
+  "version": "1.0",
+  "description": "Demo for project.",
+  "permissions": ["activeTab"],
+  "host_permissions": [
+    "<all_urls>",
+    "http://mapd.cs-smu.ca:3026/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"]
+    }
+  ]
+}
