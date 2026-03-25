@@ -6,7 +6,7 @@
   "permissions": ["activeTab"],
   "host_permissions": [
     "<all_urls>",
-    "http://mapd.cs-smu.ca:3026/*"
+    "http://mapd.cs-smu.ca:3067/*"
   ],
   "background": {
     "service_worker": "background.js"

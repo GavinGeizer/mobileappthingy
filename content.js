@@ -39,6 +39,35 @@ function isImageElement(target) {
 }
 
 /**
+ * Returns the image URL currently being rendered for an image element.
+ *
+ * @param {HTMLImageElement} img - The image element to inspect.
+ * @returns {string} The active image URL or an empty string.
+ */
+function getImageUrl(img) {
+  return img.currentSrc || img.src || "";
+}
+
+/**
+ * Captures the on-screen geometry needed to crop the image from the active tab.
+ *
+ * @param {HTMLImageElement} img - The image element to measure.
+ * @returns {{ left: number, top: number, width: number, height: number, viewportWidth: number, viewportHeight: number }} Crop metadata for the visible tab.
+ */
+function getImageCaptureArea(img) {
+  const rect = img.getBoundingClientRect();
+
+  return {
+    left: rect.left,
+    top: rect.top,
+    width: rect.width,
+    height: rect.height,
+    viewportWidth: window.innerWidth,
+    viewportHeight: window.innerHeight,
+  };
+}
+
+/**
  * Sends the selected image to the background script and speaks the response.
  *
  * @param {HTMLImageElement} img - The image element that was long-pressed.
@@ -53,15 +82,16 @@ async function analyzePressedImage(img, event) {
   event.stopPropagation();
 
   try {
+    const imageUrl = getImageUrl(img);
+
+    if (!imageUrl) {
+      throw new Error("Image has no usable source");
+    }
+
     const resp = await chrome.runtime.sendMessage({
       type: "ANALYZE_IMAGE_URL",
-      // img.currentSrc might contain the actual image being displayed.
-      // If it doesn't then it is equal to "" which is falsy.
-      // This can be different than img.src which refers to the attribute src.
-      // img.src can be differnt when, for example, there are different sized
-      // images for different sized devices.
-      // url will be currentSrc when currentSrc !== "" , otherwise it will be src
-      url: img.currentSrc || img.src,
+      url: imageUrl,
+      captureArea: getImageCaptureArea(img),
     });
 
     // if resp is null or undefined or false
@@ -83,7 +113,7 @@ async function analyzePressedImage(img, event) {
  * @param {PointerEvent} event - The original pointer event.
  * @returns {void}
  */
-function runLongPressAnalysis(img, event) {
+async function runLongPressAnalysis(img, event) {
   void analyzePressedImage(img, event);
 }
 

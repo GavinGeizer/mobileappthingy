@@ -41,7 +41,7 @@ const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
  */
 async function analyzeImage(imageUrl) {
   const response = await openai.responses.create({
-    model: "gpt-5.4",
+    model: "gpt-5.4-mini",
     input: [
       {
         role: "user",
@@ -168,7 +168,7 @@ async function handleAnalyzeBlobRequest(req, res) {
  * @returns {void}
  */
 function logServerStart() {
-  console.log("✅ Server running at http://mapd.cs-smu.ca:3026");
+  console.log("✅ Server running at http://mapd.cs-smu.ca:3067");
 }
 
 app.post("/analyze", handleAnalyzeRequest);
