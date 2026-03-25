@@ -1,4 +1,4 @@
-const SERVER_URL = "http://localhost:3067";
+const SERVER_URL = "http://mapd.cs-smu.ca:3067";
 
 function getErrorMessage(error) {
   return error instanceof Error ? error.message : String(error);
