@@ -1,61 +1,25 @@
-/*
-  The purpose of this file is to provide the content script for Server 3.    
+let availableVoices = [];
+let longPressTimer = null;
+let suppressDefaultUiUntil = 0;
 
-  Note that this extension uses an endpoint different than the server code given.
-  manifest.json must be updated to test your server code.
+const LONG_PRESS_MS = 600;
+const SUPPRESSION_WINDOW_MS = 1000;
+const PREFERRED_VOICE_NAME = "Google UK English Female";
 
-    Author: Terry
-*/
-
-/* global variables */
-let globalVoices = [];
-let pressTimer = null;
-
-/* global constants */
-const LONG_PRESS_MS = 600; // 0.6 sec gives a safe margin of the typical 0.5 sec
-const LANGUAGE_NAME = "Google UK English Female"; // client preferred soft female voice
-
-/*
-  The purpose of this function is to get the array of voices available
-  in this version of Google Chrome.
-*/
-/**
- * Loads the currently available speech synthesis voices into memory.
- *
- * @returns {void}
- */
 function loadVoices() {
-  globalVoices = speechSynthesis.getVoices();
+  availableVoices = speechSynthesis.getVoices();
 }
 
-/**
- * Determines whether an event target is an image element.
- *
- * @param {EventTarget | null} target - The target to inspect.
- * @returns {target is HTMLImageElement} `true` when the target is an image element.
- */
 function isImageElement(target) {
   return target instanceof HTMLImageElement;
 }
 
-/**
- * Returns the image URL currently being rendered for an image element.
- *
- * @param {HTMLImageElement} img - The image element to inspect.
- * @returns {string} The active image URL or an empty string.
- */
-function getImageUrl(img) {
-  return img.currentSrc || img.src || "";
+function getImageUrl(image) {
+  return image.currentSrc || image.src || "";
 }
 
-/**
- * Captures the on-screen geometry needed to crop the image from the active tab.
- *
- * @param {HTMLImageElement} img - The image element to measure.
- * @returns {{ left: number, top: number, width: number, height: number, viewportWidth: number, viewportHeight: number }} Crop metadata for the visible tab.
- */
-function getImageCaptureArea(img) {
-  const rect = img.getBoundingClientRect();
+function getImageCaptureArea(image) {
+  const rect = image.getBoundingClientRect();
 
   return {
     left: rect.left,
@@ -67,152 +31,122 @@ function getImageCaptureArea(img) {
   };
 }
 
-/**
- * Sends the selected image to the background script and speaks the response.
- *
- * @param {HTMLImageElement} img - The image element that was long-pressed.
- * @param {PointerEvent} event - The pointer event that started the long press.
- * @returns {Promise<void>}
- */
-async function analyzePressedImage(img, event) {
-  // prevents default actions like a picture being a link
-  event.preventDefault();
-  // prevents propagation that would happen with a nested div being clicked and
-  // both the actions associated with the inner div and outer div take place
-  event.stopPropagation();
-
+async function analyzePressedImage(image) {
   try {
-    const imageUrl = getImageUrl(img);
+    const imageUrl = getImageUrl(image);
 
     if (!imageUrl) {
       throw new Error("Image has no usable source");
     }
 
-    const resp = await chrome.runtime.sendMessage({
+    const response = await chrome.runtime.sendMessage({
       type: "ANALYZE_IMAGE_URL",
       url: imageUrl,
-      captureArea: getImageCaptureArea(img),
+      captureArea: getImageCaptureArea(image),
     });
 
-    // if resp is null or undefined or false
-    // then if resp is not null or undefined
-    //      then use error description
-    //      else use "Unknown error"
-    if (!resp?.ok) throw new Error(resp?.error || "Unknown error");
+    if (!response?.ok) {
+      throw new Error(response?.error || "Unknown error");
+    }
 
-    speak(resp.description);
-  } catch (err) {
-    console.error("Analyze failed:", err);
+    speak(response.description);
+  } catch (error) {
+    console.error("Analyze failed:", error);
   }
 }
 
-/**
- * Runs the delayed image analysis step after a long press.
- *
- * @param {HTMLImageElement} img - The image element that was pressed.
- * @param {PointerEvent} event - The original pointer event.
- * @returns {void}
- */
-async function runLongPressAnalysis(img, event) {
-  void analyzePressedImage(img, event);
+function clearLongPressTimer() {
+  if (longPressTimer === null) {
+    return;
+  }
+
+  clearTimeout(longPressTimer);
+  longPressTimer = null;
 }
 
-/*
-  onvoiceschanged is an event listener that activates only when the browser
-  is ready to set the globalVoices variable immediately when the line of
-  code is executed.
-
-  An important note here is that globalVoices = speechSynthesis.getVoices();
-  does not need to execute for the onvoiceschanged event to eventually fire.
-  onvoiceschanged happens asynchronously and independent of your code.
-*/
-speechSynthesis.onvoiceschanged = loadVoices; // wait for event
-loadVoices(); // try right away just in case. But you might get an empty array []
-
-/*
-    This event listener acts when an image is "long pressed"
-
-    e - the event object created by the pointertdown event
-      - contains field e.target which is the element that was directly pressed
-*/
-/**
- * Starts the long-press timer when the user presses an image.
- *
- * @param {PointerEvent} e - The pointer event fired by the document.
- * @returns {void}
- */
-function handlePointerDown(e) {
-  const img = e.target;
-  // if img is null or undefined or img.tagName is not IMG return
-  if (!isImageElement(img)) return;
-
-  pressTimer = setTimeout(runLongPressAnalysis, LONG_PRESS_MS, img, e);
+function armDefaultUiSuppression() {
+  suppressDefaultUiUntil = Date.now() + SUPPRESSION_WINDOW_MS;
 }
 
-/*
-  These event listeners work to cancel the long press event
-*/
-/**
- * Clears the active long-press timer.
- *
- * @returns {void}
- */
-function clearPressTimer() {
-  clearTimeout(pressTimer);
+function shouldSuppressDefaultUi() {
+  return Date.now() <= suppressDefaultUiUntil;
 }
 
-/*
-  Stop the context menu appearing due to a long-press.
-*/
-/**
- * Prevents the browser context menu from appearing on long press.
- *
- * @param {MouseEvent} e - The context menu event fired by the document.
- * @returns {void}
- */
-function handleContextMenu(e) {
-  e.preventDefault();
+function handlePointerDown(event) {
+  suppressDefaultUiUntil = 0;
+
+  if (event.pointerType === "mouse" && event.button !== 0) {
+    return;
+  }
+
+  const image = event.target;
+
+  if (!isImageElement(image)) {
+    return;
+  }
+
+  clearLongPressTimer();
+  longPressTimer = setTimeout(() => {
+    longPressTimer = null;
+    armDefaultUiSuppression();
+    void analyzePressedImage(image);
+  }, LONG_PRESS_MS);
 }
 
-/**
- * Checks whether a voice matches the preferred voice name.
- *
- * @param {SpeechSynthesisVoice} voice - The voice candidate to test.
- * @returns {boolean} `true` when the voice matches the preferred name.
- */
+function handleClick(event) {
+  if (!shouldSuppressDefaultUi()) {
+    return;
+  }
+
+  const clickedImage = event.composedPath().find(isImageElement);
+
+  if (!clickedImage) {
+    return;
+  }
+
+  suppressDefaultUiUntil = 0;
+  event.preventDefault();
+  event.stopPropagation();
+}
+
+function handleContextMenu(event) {
+  if (!shouldSuppressDefaultUi()) {
+    return;
+  }
+
+  suppressDefaultUiUntil = 0;
+  event.preventDefault();
+}
+
 function isPreferredVoice(voice) {
-  return voice.name === LANGUAGE_NAME;
+  return voice.name === PREFERRED_VOICE_NAME;
 }
 
-/**
- * Speaks a description using the preferred browser voice when available.
- *
- * @param {string} text - The text to speak aloud.
- * @returns {void}
- */
 function speak(text) {
   speechSynthesis.cancel();
 
-  const u = new SpeechSynthesisUtterance(text);
-  // u.lang used when you want a voice but you let the browser choose something close
-  // It's here only as information, and is not required for the app
-  u.lang = "en-GB";
-  u.rate = 0.95;
-  u.pitch = 1.0;
-  u.volume = 1.0;
+  const utterance = new SpeechSynthesisUtterance(text);
+  utterance.lang = "en-GB";
+  utterance.rate = 0.95;
+  utterance.pitch = 1.0;
+  utterance.volume = 1.0;
 
-  const voice = globalVoices.find(isPreferredVoice);
+  const preferredVoice = availableVoices.find(isPreferredVoice);
 
-  if (voice) {
-    u.voice = voice;
+  if (preferredVoice) {
+    utterance.voice = preferredVoice;
   } else {
     console.log("Voice not found, using default");
   }
 
-  speechSynthesis.speak(u);
+  speechSynthesis.speak(utterance);
 }
 
+speechSynthesis.onvoiceschanged = loadVoices;
+loadVoices();
+
 document.addEventListener("pointerdown", handlePointerDown);
-document.addEventListener("pointerup", clearPressTimer);
-document.addEventListener("pointercancel", clearPressTimer);
+document.addEventListener("pointerup", clearLongPressTimer);
+document.addEventListener("pointercancel", clearLongPressTimer);
+document.addEventListener("click", handleClick, true);
 document.addEventListener("contextmenu", handleContextMenu);

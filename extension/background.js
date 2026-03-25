@@ -1,57 +1,40 @@
-/*
-  The purpose of this file is to provide the background script for Server 3.
+const SERVER_URL = "http://localhost:3067";
 
-  Note that this extension uses an endpoint different than the server code given.
-  manifest.json must be updated to test your server code.
-
-  author: Terry
-*/
-
-const SERVER_URL = "http://mapd.cs-smu.ca:3067";
-
-/**
- * Returns an empty string when a text response cannot be read.
- *
- * @returns {string}
- */
-function returnEmptyString() {
-  return "";
-}
-
-/**
- * Returns a readable error message string.
- *
- * @param {unknown} error - The error to stringify.
- * @returns {string} A normalized error message.
- */
 function getErrorMessage(error) {
-  return String(error?.message || error);
+  return error instanceof Error ? error.message : String(error);
 }
 
-/**
- * Reads a server response and normalizes it into a payload object.
- *
- * @param {Response} response - The server response to parse.
- * @returns {Promise<object>} The parsed JSON payload or a text-based error object.
- */
+function getServerUnavailableMessage() {
+  return `Could not reach the backend at ${SERVER_URL}. Start the backend server and make sure it is listening on that port.`;
+}
+
+async function requestServer(path, init) {
+  try {
+    return await fetch(`${SERVER_URL}${path}`, init);
+  } catch (error) {
+    throw new Error(getServerUnavailableMessage());
+  }
+}
+
+function collapseErrors(errors) {
+  const messages = [...new Set(errors.map(getErrorMessage).filter(Boolean))];
+  return messages.join(". ");
+}
+
 async function readServerPayload(response) {
   const contentType = response.headers.get("content-type") || "";
 
   if (contentType.includes("application/json")) {
-    return response.json();
+    return response.json().catch(() => ({ error: "Server returned invalid JSON" }));
   }
 
-  return { error: await response.text().catch(returnEmptyString) };
+  return {
+    error: await response.text().catch(() => ""),
+  };
 }
 
-/**
- * Requests image analysis from the server using the original image URL.
- *
- * @param {string} imageUrl - The image URL captured from the page.
- * @returns {Promise<object>} The server response payload.
- */
 async function requestImageAnalysisByUrl(imageUrl) {
-  const serverRes = await fetch(`${SERVER_URL}/analyze`, {
+  const serverResponse = await requestServer("/analyze", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -59,25 +42,15 @@ async function requestImageAnalysisByUrl(imageUrl) {
     body: JSON.stringify({ imageUrl }),
   });
 
-  const data = await readServerPayload(serverRes);
+  const data = await readServerPayload(serverResponse);
 
-  if (serverRes.ok) {
+  if (serverResponse.ok || data?.needsBlob) {
     return data;
   }
 
-  if (data?.needsBlob) {
-    return data;
-  }
-
-  throw new Error(`Server failed: ${serverRes.status} ${data?.error || ""}`);
+  throw new Error(`Server failed: ${serverResponse.status} ${data?.error || ""}`.trim());
 }
 
-/**
- * Safely returns the protocol for a URL-like string.
- *
- * @param {string} url - The URL string to inspect.
- * @returns {string} The parsed protocol or an empty string.
- */
 function getUrlProtocol(url) {
   try {
     return new URL(url).protocol;
@@ -86,22 +59,15 @@ function getUrlProtocol(url) {
   }
 }
 
-/**
- * Returns whether a value is a finite number.
- *
- * @param {unknown} value - The value to validate.
- * @returns {boolean} `true` when the value is finite.
- */
+function isRemoteUrl(url) {
+  const protocol = getUrlProtocol(url);
+  return protocol === "http:" || protocol === "https:";
+}
+
 function isFiniteNumber(value) {
   return Number.isFinite(value);
 }
 
-/**
- * Validates the capture metadata sent from the content script.
- *
- * @param {object | undefined} captureArea - The capture metadata to inspect.
- * @returns {boolean} `true` when the capture area can be used.
- */
 function isValidCaptureArea(captureArea) {
   return Boolean(captureArea) &&
     isFiniteNumber(captureArea.left) &&
@@ -116,25 +82,10 @@ function isValidCaptureArea(captureArea) {
     captureArea.viewportHeight > 0;
 }
 
-/**
- * Clamps a value between a minimum and maximum value.
- *
- * @param {number} value - The value to clamp.
- * @param {number} min - The smallest allowed value.
- * @param {number} max - The largest allowed value.
- * @returns {number} The clamped value.
- */
 function clamp(value, min, max) {
   return Math.min(Math.max(value, min), max);
 }
 
-/**
- * Captures the visible tab and crops it to the pressed image.
- *
- * @param {{ left: number, top: number, width: number, height: number, viewportWidth: number, viewportHeight: number }} captureArea - The viewport-relative image rectangle.
- * @param {number} windowId - The window that owns the active tab.
- * @returns {Promise<Blob>} The cropped image blob captured from the client device.
- */
 async function captureImageBlob(captureArea, windowId) {
   if (!isValidCaptureArea(captureArea)) {
     throw new Error("Missing image capture details from the page");
@@ -146,6 +97,7 @@ async function captureImageBlob(captureArea, windowId) {
   const screenshotBitmap = await createImageBitmap(screenshotBlob);
 
   try {
+    // Scale the viewport-relative DOM rectangle into screenshot pixels.
     const scaleX = screenshotBitmap.width / captureArea.viewportWidth;
     const scaleY = screenshotBitmap.height / captureArea.viewportHeight;
     const sourceLeft = clamp(Math.round(captureArea.left * scaleX), 0, screenshotBitmap.width);
@@ -168,13 +120,13 @@ async function captureImageBlob(captureArea, windowId) {
     }
 
     const canvas = new OffscreenCanvas(sourceWidth, sourceHeight);
-    const ctx = canvas.getContext("2d");
+    const context = canvas.getContext("2d");
 
-    if (!ctx) {
+    if (!context) {
       throw new Error("Could not create capture canvas");
     }
 
-    ctx.drawImage(
+    context.drawImage(
       screenshotBitmap,
       sourceLeft,
       sourceTop,
@@ -192,66 +144,52 @@ async function captureImageBlob(captureArea, windowId) {
   }
 }
 
-/**
- * Fetches an image URL in the extension context and returns it as a blob.
- *
- * @param {string} imageUrl - The image URL to fetch from the client side.
- * @returns {Promise<Blob>} The fetched image blob.
- */
 async function fetchImageBlob(imageUrl) {
-  const imageResponse = await fetch(imageUrl);
+  let imageResponse;
+
+  try {
+    imageResponse = await fetch(imageUrl);
+  } catch (error) {
+    throw new Error(`Extension could not fetch the image directly: ${getErrorMessage(error)}`);
+  }
 
   if (!imageResponse.ok) {
     throw new Error(`Image fetch failed: ${imageResponse.status}`);
   }
 
+  const contentType = (imageResponse.headers.get("content-type") || "").toLowerCase();
+
+  if (contentType && !contentType.startsWith("image/")) {
+    throw new Error(`Fetched resource is not an image: ${contentType}`);
+  }
+
   return imageResponse.blob();
 }
 
-/**
- * Requests image analysis from the server using an uploaded blob.
- *
- * @param {Blob} imageBlob - The image captured on the client device.
- * @param {string} fileName - The upload filename to send to the server.
- * @returns {Promise<object>} The server response payload.
- */
 async function requestImageAnalysisByBlob(imageBlob, fileName) {
   const form = new FormData();
 
   form.append("image", imageBlob, fileName);
 
-  const serverRes = await fetch(`${SERVER_URL}/analyze/blob`, {
+  const serverResponse = await requestServer("/analyze/blob", {
     method: "POST",
     body: form,
   });
 
-  const data = await readServerPayload(serverRes);
+  const data = await readServerPayload(serverResponse);
 
-  if (!serverRes.ok) {
-    throw new Error(`Server failed: ${serverRes.status} ${data?.error || ""}`);
+  if (!serverResponse.ok) {
+    throw new Error(`Server failed: ${serverResponse.status} ${data?.error || ""}`.trim());
   }
 
   return data;
 }
 
-/**
- * Fetches the image bytes in the client context and uploads them to the server.
- *
- * @param {string} imageUrl - The image URL to fetch.
- * @returns {Promise<object>} The server response payload.
- */
 async function requestImageAnalysisByFetchedBlob(imageUrl) {
   const imageBlob = await fetchImageBlob(imageUrl);
   return requestImageAnalysisByBlob(imageBlob, "client-image");
 }
 
-/**
- * Captures the visible image region from the tab and uploads it to the server.
- *
- * @param {{ left: number, top: number, width: number, height: number, viewportWidth: number, viewportHeight: number } | undefined} captureArea - The image rectangle in the viewport.
- * @param {{ tab?: { windowId?: number } }} sender - Metadata about the tab that sent the request.
- * @returns {Promise<object>} The server response payload.
- */
 async function requestImageAnalysisByScreenshot(captureArea, sender) {
   const windowId = sender.tab?.windowId;
 
@@ -263,75 +201,66 @@ async function requestImageAnalysisByScreenshot(captureArea, sender) {
   return requestImageAnalysisByBlob(capturedImage, "client-capture.png");
 }
 
-/**
- * Handles the end-to-end image analysis flow for a content script message.
- *
- * @param {{ url: string, captureArea?: { left: number, top: number, width: number, height: number, viewportWidth: number, viewportHeight: number } }} msg - The message sent from the content script.
- * @param {{ tab?: { windowId?: number } }} sender - Metadata about the tab that sent the request.
- * @param {(response: { ok: boolean, description?: string, error?: string }) => void} sendResponse - Sends a result back to the content script.
- * @returns {Promise<void>}
- */
-async function handleAnalyzeImageMessage(msg, sender, sendResponse) {
+async function resolveImageAnalysis(message, sender) {
+  if (typeof message?.url !== "string" || !message.url) {
+    throw new Error("Missing image URL");
+  }
+
+  const errors = [];
+
+  if (isRemoteUrl(message.url)) {
+    try {
+      const data = await requestImageAnalysisByUrl(message.url);
+
+      if (!data?.needsBlob) {
+        return data;
+      }
+
+      errors.push(new Error(data.error || "Server requested a blob upload"));
+    } catch (error) {
+      errors.push(error);
+    }
+  }
+
   try {
-    const protocol = getUrlProtocol(msg.url);
-    const isRemoteUrl = protocol === "http:" || protocol === "https:";
-    let data = null;
+    return await requestImageAnalysisByFetchedBlob(message.url);
+  } catch (error) {
+    errors.push(error);
+  }
 
-    if (isRemoteUrl) {
-      try {
-        data = await requestImageAnalysisByUrl(msg.url);
-      } catch {
-        data = null;
-      }
-    }
+  try {
+    return await requestImageAnalysisByScreenshot(message.captureArea, sender);
+  } catch (error) {
+    errors.push(error);
+  }
 
-    if (!data || data.needsBlob) {
-      try {
-        data = await requestImageAnalysisByFetchedBlob(msg.url);
-      } catch (blobError) {
-        try {
-          data = await requestImageAnalysisByScreenshot(msg.captureArea, sender);
-        } catch (screenshotError) {
-          throw new Error(
-            `Blob fallback failed: ${getErrorMessage(blobError)}. Screenshot fallback failed: ${getErrorMessage(screenshotError)}`
-          );
-        }
-      }
-    }
+  throw new Error(collapseErrors(errors));
+}
+
+async function handleAnalyzeImageMessage(message, sender, sendResponse) {
+  try {
+    // Prefer the original URL, then fall back to client-side upload paths.
+    const data = await resolveImageAnalysis(message, sender);
 
     sendResponse({
       ok: true,
-      // if .description is falsy (null, undefined,...) use (no description)
       description: data.description || "(no description)",
     });
-    // NETWORK OR CLIENT SIDE FAILURE: example is status equals 400 or 404
-  } catch (err) {
-    // .error instead of .log so it shows up as an error with a stack trace
-    console.error(err);
-    // if err is truthy use .message otherwise use err which will be undefined
-    // and make sure both are represented as strings
-    sendResponse({ ok: false, error: getErrorMessage(err) });
+  } catch (error) {
+    console.error(error);
+    sendResponse({
+      ok: false,
+      error: getErrorMessage(error),
+    });
   }
 }
 
-/**
- * Receives messages from the content script and keeps the response channel open.
- *
- * @param {{ type?: string, url?: string }} msg - The runtime message payload.
- * @param {object} sender - Metadata about the sender of the message.
- * @param {(response: { ok: boolean, description?: string, error?: string }) => void} sendResponse - Sends a result back to the content script.
- * @returns {boolean|undefined} `true` when the message is handled asynchronously.
- */
-function onRuntimeMessage(msg, sender, sendResponse) {
-  if (msg?.type !== "ANALYZE_IMAGE_URL") return;
+function onRuntimeMessage(message, sender, sendResponse) {
+  if (message?.type !== "ANALYZE_IMAGE_URL") {
+    return;
+  }
 
-  handleAnalyzeImageMessage(msg, sender, sendResponse);
-
-  // Keeps communication channel to content open.
-  // Tells Chrome to wait until sendResponse completes.
-  // Then channel closes after sendResponse executes.
-  // Without return true; the channel closes right away
-  // when it gets to the end of the listener.
+  void handleAnalyzeImageMessage(message, sender, sendResponse);
   return true;
 }
 

@@ -1,46 +1,56 @@
-/*
-  The purpose of this file is to provide a partial server solution for Server 3.
-
-  author: Terry
-
-*/
-
+import cors from "cors";
 import express from "express";
 import multer from "multer";
-import cors from "cors";
-// import OpenAi Software Development Kit (SDK)
-// to pay for credits and get your own API key
-// go to the OpenAI Platform for billing
 import OpenAI from "openai";
 
-const PORT = 3067;
-const app = express();
+function loadEnvironment() {
+  try {
+    process.loadEnvFile(new URL("./.env", import.meta.url));
+  } catch (error) {
+    if (error?.code !== "ENOENT") {
+      console.warn("Could not load backend/.env:", error);
+    }
+  }
+}
 
-// keep uploads in memory and set a file size limit of 15MB
+loadEnvironment();
+
+const PORT = Number(process.env.PORT) || 3067;
+const API_KEY = process.env.OPENAI_API_KEY;
+
+const app = express();
 const upload = multer({
   storage: multer.memoryStorage(),
-  //                              1024 bytes
-  //                       1024 * 1KB
-  //                  15 * 1MB
-  //                  15MB
   limits: { fileSize: 15 * 1024 * 1024 },
 });
+const openai = API_KEY ? new OpenAI({ apiKey: API_KEY }) : null;
 
 app.use(cors());
 app.use(express.json({ limit: "1mb" }));
 
-// use your API key to
-// openAI supports jpg/jpeg, png, webp, and non-animated gif
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+function getErrorMessage(error) {
+  return error instanceof Error ? error.message : String(error);
+}
 
-/**
- * Sends an image input to OpenAI and returns the generated description.
- *
- * @param {string} imageUrl - The remote image URL or data URL to analyze.
- * @returns {Promise<string>} The textual description returned by OpenAI.
- */
+function getOpenAIClient() {
+  if (!openai) {
+    throw new Error("OPENAI_API_KEY is not set");
+  }
+
+  return openai;
+}
+
+function isHttpUrl(value) {
+  try {
+    const protocol = new URL(value).protocol;
+    return protocol === "http:" || protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
 async function analyzeImage(imageUrl) {
-  const response = await openai.responses.create({
+  const response = await getOpenAIClient().responses.create({
     model: "gpt-5.4-mini",
     input: [
       {
@@ -62,22 +72,10 @@ async function analyzeImage(imageUrl) {
   return response.output_text?.trim() || "(no description)";
 }
 
-/**
- * Aborts an in-flight fetch controller.
- *
- * @param {AbortController} controller - The controller to abort.
- * @returns {void}
- */
 function abortFetch(controller) {
   controller.abort();
 }
 
-/**
- * Checks whether the server can access a given image URL directly.
- *
- * @param {string} imageUrl - The image URL to test.
- * @returns {Promise<boolean>} `true` when the server can fetch the image URL.
- */
 async function canUseImageUrl(imageUrl) {
   const controller = new AbortController();
   const timeout = setTimeout(abortFetch, 5000, controller);
@@ -97,30 +95,16 @@ async function canUseImageUrl(imageUrl) {
   }
 }
 
-/*
-  The purpose of this endpoint is to supply OpenAI with the
-  image to analyze and then get a textual description of the image,
-  and then send the description to the background script.
-
-  upload.single(image) instructs the endpoint to:
-  - upload exactly one image found at the form field "image"
-
-  req - request object
-  res - result object
-*/
-/**
- * Handles URL-based image analysis requests.
- *
- * @param {import("express").Request} req - The Express request object.
- * @param {import("express").Response} res - The Express response object.
- * @returns {Promise<void>}
- */
 async function handleAnalyzeRequest(req, res) {
   try {
     const imageUrl = req.body?.imageUrl;
 
     if (!imageUrl) {
       return res.status(400).json({ error: "No image URL provided" });
+    }
+
+    if (!isHttpUrl(imageUrl)) {
+      return res.status(400).json({ error: "imageUrl must be an http or https URL" });
     }
 
     if (!(await canUseImageUrl(imageUrl))) {
@@ -132,49 +116,65 @@ async function handleAnalyzeRequest(req, res) {
 
     const description = await analyzeImage(imageUrl);
     res.json({ description, source: "url" });
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: e.message });
+  } catch (error) {
+    console.error(error);
+    res.status(error?.message === "OPENAI_API_KEY is not set" ? 503 : 500).json({
+      error: getErrorMessage(error),
+    });
   }
 }
 
-/**
- * Handles blob upload image analysis requests.
- *
- * @param {import("express").Request} req - The Express request object.
- * @param {import("express").Response} res - The Express response object.
- * @returns {Promise<void>}
- */
 async function handleAnalyzeBlobRequest(req, res) {
   try {
     if (!req.file) {
       return res.status(400).json({ error: "No image uploaded" });
     }
 
-    const mime = req.file.mimetype || "image/jpeg";
-    const dataUrl = `data:${mime};base64,${req.file.buffer.toString("base64")}`;
+    const mimeType = req.file.mimetype || "image/jpeg";
+
+    if (!mimeType.startsWith("image/")) {
+      return res.status(400).json({ error: "Uploaded file must be an image" });
+    }
+
+    const dataUrl = `data:${mimeType};base64,${req.file.buffer.toString("base64")}`;
     const description = await analyzeImage(dataUrl);
 
     res.json({ description, source: "blob" });
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: e.message });
+  } catch (error) {
+    console.error(error);
+    res.status(error?.message === "OPENAI_API_KEY is not set" ? 503 : 500).json({
+      error: getErrorMessage(error),
+    });
   }
 }
 
-/**
- * Logs the server startup URL once the listener is active.
- *
- * @returns {void}
- */
+function handleServerError(error, req, res, next) {
+  if (error instanceof multer.MulterError) {
+    const message = error.code === "LIMIT_FILE_SIZE"
+      ? "Uploaded image exceeds the 15 MB limit"
+      : error.message;
+
+    return res.status(400).json({ error: message });
+  }
+
+  if (error) {
+    console.error(error);
+    return res.status(500).json({ error: getErrorMessage(error) });
+  }
+
+  next();
+}
+
 function logServerStart() {
-  console.log("✅ Server running at http://mapd.cs-smu.ca:3067");
+  console.log(`Server running at http://localhost:${PORT}`);
+
+  if (!API_KEY) {
+    console.warn("OPENAI_API_KEY is not set. Image analysis requests will fail until it is configured.");
+  }
 }
 
 app.post("/analyze", handleAnalyzeRequest);
 app.post("/analyze/blob", upload.single("image"), handleAnalyzeBlobRequest);
+app.use(handleServerError);
 
-/*
-  The purpose of this function is to listen to PORT.
-*/
 app.listen(PORT, logServerStart);
