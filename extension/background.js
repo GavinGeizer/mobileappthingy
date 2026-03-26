@@ -1,4 +1,5 @@
 const SERVER_URL = "http://mapd.cs-smu.ca:3067";
+const ANALYZE_IMAGE_MESSAGE = "ANALYZE_IMAGE_URL";
 
 function getErrorMessage(error) {
   return error instanceof Error ? error.message : String(error);
@@ -8,17 +9,20 @@ function getServerUnavailableMessage() {
   return `Could not reach the backend at ${SERVER_URL}. Start the backend server and make sure it is listening on that port.`;
 }
 
+function collapseErrors(messages) {
+  return [...new Set(messages.filter(Boolean))].join(". ");
+}
+
+function buildServerError(status, data) {
+  return new Error(`Server failed: ${status} ${data?.error || ""}`.trim());
+}
+
 async function requestServer(path, init) {
   try {
     return await fetch(`${SERVER_URL}${path}`, init);
-  } catch (error) {
+  } catch {
     throw new Error(getServerUnavailableMessage());
   }
-}
-
-function collapseErrors(errors) {
-  const messages = [...new Set(errors.map(getErrorMessage).filter(Boolean))];
-  return messages.join(". ");
 }
 
 async function readServerPayload(response) {
@@ -33,8 +37,25 @@ async function readServerPayload(response) {
   };
 }
 
+// Keep the low-level server call and payload parsing together so each analysis
+// path can focus on its own fallback logic.
+async function requestServerData(path, init) {
+  const response = await requestServer(path, init);
+  const data = await readServerPayload(response);
+
+  return { response, data };
+}
+
+function ensureSuccessfulServerResponse(response, data, { allowBlobFallback = false } = {}) {
+  if (response.ok || (allowBlobFallback && data?.needsBlob)) {
+    return data;
+  }
+
+  throw buildServerError(response.status, data);
+}
+
 async function requestImageAnalysisByUrl(imageUrl) {
-  const serverResponse = await requestServer("/analyze", {
+  const { response, data } = await requestServerData("/analyze", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -42,40 +63,30 @@ async function requestImageAnalysisByUrl(imageUrl) {
     body: JSON.stringify({ imageUrl }),
   });
 
-  const data = await readServerPayload(serverResponse);
-
-  if (serverResponse.ok || data?.needsBlob) {
-    return data;
-  }
-
-  throw new Error(`Server failed: ${serverResponse.status} ${data?.error || ""}`.trim());
-}
-
-function getUrlProtocol(url) {
-  try {
-    return new URL(url).protocol;
-  } catch {
-    return "";
-  }
+  return ensureSuccessfulServerResponse(response, data, { allowBlobFallback: true });
 }
 
 function isRemoteUrl(url) {
-  const protocol = getUrlProtocol(url);
-  return protocol === "http:" || protocol === "https:";
-}
-
-function isFiniteNumber(value) {
-  return Number.isFinite(value);
+  try {
+    const protocol = new URL(url).protocol;
+    return protocol === "http:" || protocol === "https:";
+  } catch {
+    return false;
+  }
 }
 
 function isValidCaptureArea(captureArea) {
+  const numericFields = [
+    "left",
+    "top",
+    "width",
+    "height",
+    "viewportWidth",
+    "viewportHeight",
+  ];
+
   return Boolean(captureArea) &&
-    isFiniteNumber(captureArea.left) &&
-    isFiniteNumber(captureArea.top) &&
-    isFiniteNumber(captureArea.width) &&
-    isFiniteNumber(captureArea.height) &&
-    isFiniteNumber(captureArea.viewportWidth) &&
-    isFiniteNumber(captureArea.viewportHeight) &&
+    numericFields.every((field) => Number.isFinite(captureArea[field])) &&
     captureArea.width > 0 &&
     captureArea.height > 0 &&
     captureArea.viewportWidth > 0 &&
@@ -84,6 +95,32 @@ function isValidCaptureArea(captureArea) {
 
 function clamp(value, min, max) {
   return Math.min(Math.max(value, min), max);
+}
+
+// The screenshot can be a different pixel size than the page viewport, so the
+// DOM rectangle from the content script must be scaled before cropping.
+function getScaledCaptureBounds(captureArea, screenshotBitmap) {
+  const scaleX = screenshotBitmap.width / captureArea.viewportWidth;
+  const scaleY = screenshotBitmap.height / captureArea.viewportHeight;
+  const left = clamp(Math.round(captureArea.left * scaleX), 0, screenshotBitmap.width);
+  const top = clamp(Math.round(captureArea.top * scaleY), 0, screenshotBitmap.height);
+  const right = clamp(
+    Math.round((captureArea.left + captureArea.width) * scaleX),
+    0,
+    screenshotBitmap.width
+  );
+  const bottom = clamp(
+    Math.round((captureArea.top + captureArea.height) * scaleY),
+    0,
+    screenshotBitmap.height
+  );
+
+  return {
+    left,
+    top,
+    width: right - left,
+    height: bottom - top,
+  };
 }
 
 async function captureImageBlob(captureArea, windowId) {
@@ -97,29 +134,14 @@ async function captureImageBlob(captureArea, windowId) {
   const screenshotBitmap = await createImageBitmap(screenshotBlob);
 
   try {
-    // Scale the viewport-relative DOM rectangle into screenshot pixels.
-    const scaleX = screenshotBitmap.width / captureArea.viewportWidth;
-    const scaleY = screenshotBitmap.height / captureArea.viewportHeight;
-    const sourceLeft = clamp(Math.round(captureArea.left * scaleX), 0, screenshotBitmap.width);
-    const sourceTop = clamp(Math.round(captureArea.top * scaleY), 0, screenshotBitmap.height);
-    const sourceRight = clamp(
-      Math.round((captureArea.left + captureArea.width) * scaleX),
-      0,
-      screenshotBitmap.width
-    );
-    const sourceBottom = clamp(
-      Math.round((captureArea.top + captureArea.height) * scaleY),
-      0,
-      screenshotBitmap.height
-    );
-    const sourceWidth = sourceRight - sourceLeft;
-    const sourceHeight = sourceBottom - sourceTop;
+    // Translate the DOM rectangle into actual screenshot pixels before cropping.
+    const bounds = getScaledCaptureBounds(captureArea, screenshotBitmap);
 
-    if (sourceWidth <= 0 || sourceHeight <= 0) {
+    if (bounds.width <= 0 || bounds.height <= 0) {
       throw new Error("Image is not visible enough to capture");
     }
 
-    const canvas = new OffscreenCanvas(sourceWidth, sourceHeight);
+    const canvas = new OffscreenCanvas(bounds.width, bounds.height);
     const context = canvas.getContext("2d");
 
     if (!context) {
@@ -128,14 +150,14 @@ async function captureImageBlob(captureArea, windowId) {
 
     context.drawImage(
       screenshotBitmap,
-      sourceLeft,
-      sourceTop,
-      sourceWidth,
-      sourceHeight,
+      bounds.left,
+      bounds.top,
+      bounds.width,
+      bounds.height,
       0,
       0,
-      sourceWidth,
-      sourceHeight
+      bounds.width,
+      bounds.height
     );
 
     return canvas.convertToBlob({ type: "image/png" });
@@ -168,26 +190,14 @@ async function fetchImageBlob(imageUrl) {
 
 async function requestImageAnalysisByBlob(imageBlob, fileName) {
   const form = new FormData();
-
   form.append("image", imageBlob, fileName);
 
-  const serverResponse = await requestServer("/analyze/blob", {
+  const { response, data } = await requestServerData("/analyze/blob", {
     method: "POST",
     body: form,
   });
 
-  const data = await readServerPayload(serverResponse);
-
-  if (!serverResponse.ok) {
-    throw new Error(`Server failed: ${serverResponse.status} ${data?.error || ""}`.trim());
-  }
-
-  return data;
-}
-
-async function requestImageAnalysisByFetchedBlob(imageUrl) {
-  const imageBlob = await fetchImageBlob(imageUrl);
-  return requestImageAnalysisByBlob(imageBlob, "client-image");
+  return ensureSuccessfulServerResponse(response, data);
 }
 
 async function requestImageAnalysisByScreenshot(captureArea, sender) {
@@ -201,6 +211,42 @@ async function requestImageAnalysisByScreenshot(captureArea, sender) {
   return requestImageAnalysisByBlob(capturedImage, "client-capture.png");
 }
 
+function buildAnalysisStrategies(message, sender) {
+  const strategies = [];
+
+  // Try the cheapest path first, then fall back to client-side uploads if the
+  // backend cannot reach the image directly.
+  if (isRemoteUrl(message.url)) {
+    strategies.push({
+      label: "backend URL analysis",
+      run: async () => {
+        const data = await requestImageAnalysisByUrl(message.url);
+
+        if (data?.needsBlob) {
+          throw new Error(data.error || "Server requested a blob upload");
+        }
+
+        return data;
+      },
+    });
+  }
+
+  strategies.push({
+    label: "extension image fetch upload",
+    run: async () => {
+      const imageBlob = await fetchImageBlob(message.url);
+      return requestImageAnalysisByBlob(imageBlob, "client-image");
+    },
+  });
+
+  strategies.push({
+    label: "tab screenshot upload",
+    run: async () => requestImageAnalysisByScreenshot(message.captureArea, sender),
+  });
+
+  return strategies;
+}
+
 async function resolveImageAnalysis(message, sender) {
   if (typeof message?.url !== "string" || !message.url) {
     throw new Error("Missing image URL");
@@ -208,30 +254,16 @@ async function resolveImageAnalysis(message, sender) {
 
   const errors = [];
 
-  if (isRemoteUrl(message.url)) {
+  // Walk the fallback chain in order and keep every failure message so the user
+  // gets a single actionable error if all strategies fail.
+  for (const strategy of buildAnalysisStrategies(message, sender)) {
     try {
-      const data = await requestImageAnalysisByUrl(message.url);
-
-      if (!data?.needsBlob) {
-        return data;
-      }
-
-      errors.push(new Error(data.error || "Server requested a blob upload"));
+      return await strategy.run();
     } catch (error) {
-      errors.push(error);
+      const message = `${strategy.label}: ${getErrorMessage(error)}`;
+      console.warn(`[background] ${message}`);
+      errors.push(message);
     }
-  }
-
-  try {
-    return await requestImageAnalysisByFetchedBlob(message.url);
-  } catch (error) {
-    errors.push(error);
-  }
-
-  try {
-    return await requestImageAnalysisByScreenshot(message.captureArea, sender);
-  } catch (error) {
-    errors.push(error);
   }
 
   throw new Error(collapseErrors(errors));
@@ -239,7 +271,6 @@ async function resolveImageAnalysis(message, sender) {
 
 async function handleAnalyzeImageMessage(message, sender, sendResponse) {
   try {
-    // Prefer the original URL, then fall back to client-side upload paths.
     const data = await resolveImageAnalysis(message, sender);
 
     sendResponse({
@@ -256,7 +287,7 @@ async function handleAnalyzeImageMessage(message, sender, sendResponse) {
 }
 
 function onRuntimeMessage(message, sender, sendResponse) {
-  if (message?.type !== "ANALYZE_IMAGE_URL") {
+  if (message?.type !== ANALYZE_IMAGE_MESSAGE) {
     return;
   }
 
