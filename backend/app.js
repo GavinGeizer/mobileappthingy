@@ -8,7 +8,15 @@ export const DEFAULT_PORT = 3067;
 export const MAX_UPLOAD_BYTES = 15 * 1024 * 1024;
 export const URL_FETCH_TIMEOUT_MS = 5000;
 export const ANALYSIS_MODEL = "gpt-5.4-mini";
-export const IMAGE_DESCRIPTION_PROMPT = "Describe this image for a user who cannot see it. Keep it concise and mention the most important visual details.";
+export const IMAGE_DESCRIPTION_PROMPT = `Describe this image as if speaking to someone who cannot see it.
+
+Focus on what matters most:
+- Main subject or focal point
+- Key actions or interactions happening
+- Important text, numbers, or symbols visible
+- Relevant colors, spatial relationships, or composition
+
+Speak naturally and conversationally. Prioritize information that helps the listener understand the image's purpose and content. Keep it brief—aim for 2-3 sentences unless the image is complex.`;
 
 export function loadEnvironment() {
   try {
