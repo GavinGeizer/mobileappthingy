@@ -4,19 +4,13 @@
   Note that this extension uses an endpoint different than the server code given.
   manifest.json must be updated to test your server code.
 
-  author: Terry
+  comments for functions in this file are in JSDoc format, which is a common way to document JavaScript code.
+  you can find out all the translations here: https://jsdoc.app/tags-param.html - Gavin
+
+  Athor: Terry, Gavin, Ajay, Matt
 */
 
 const SERVER_URL = "http://mapd.cs-smu.ca:3067";
-
-/**
- * Returns an empty string when a text response cannot be read.
- *
- * @returns {string}
- */
-function returnEmptyString() {
-  return "";
-}
 
 /**
  * Reads a server response and normalizes it into a payload object.
@@ -30,8 +24,9 @@ async function readServerPayload(response) {
   if (contentType.includes("application/json")) {
     return response.json();
   }
-
-  return { error: await response.text().catch(returnEmptyString) };
+  // If the response isn't JSON, attempt to read it as text for error reporting.
+  // returns a empty string if response.text() fails for any reason (e.g., body already read, network error)
+  return { error: await response.text().catch(() => "") };
 }
 
 /**
@@ -50,15 +45,17 @@ async function requestImageAnalysisByUrl(imageUrl) {
   });
 
   const data = await readServerPayload(serverRes);
-
+  // If the server response is not OK, but indicates that a blob upload is needed, return that info instead of throwing an error.
   if (serverRes.ok) {
     return data;
   }
-
+  // If the server response is not OK and does not indicate a blob upload is needed, throw an error to be caught by the caller.
   if (data?.needsBlob) {
     return data;
   }
-
+  // throw an error because the server response is not OK and does not indicate a blob upload is needed, which means the request failed for some reason other than needing a blob upload.
+  // reasons this occur could be OpenAI server Failure, Server Code Failure, Network Failure, etc.
+  // or special edgecases like av1f image files, canvas images with tainting issues, or CORS issues that prevent the server from accessing the image URL directly. 
   throw new Error(`Server failed: ${serverRes.status} ${data?.error || ""}`);
 }
 
@@ -69,12 +66,14 @@ async function requestImageAnalysisByUrl(imageUrl) {
  * @returns {Promise<Blob>} The fetched image blob.
  */
 async function fetchImageBlob(imageUrl) {
+  // Fetch the image data directly in the extension context to bypass CORS issues and other access problems that the server might encounter.
   const imgRes = await fetch(imageUrl);
 
+  // if for whatever reason the image fetch fails (e.g., network error, CORS issue, invalid URL (somehow)), throw an error to be caught by the caller.
   if (!imgRes.ok) {
     throw new Error(`Image fetch failed: ${imgRes.status}`);
   }
-
+  // simply return the image data as a blob.
   return imgRes.blob();
 }
 
@@ -84,12 +83,15 @@ async function fetchImageBlob(imageUrl) {
  * @param {string} imageUrl - The image URL to fetch and convert into a blob.
  * @returns {Promise<object>} The server response payload.
  */
-async function requestImageAnalysisByBlob(imageUrl) {
-  const blobRep = await fetchImageBlob(imageUrl);
+async function requestImageAnalysisByBlob(imageAsBlob) {
+  const blobRep = await fetchImageBlob(imageAsBlob);
   const form = new FormData();
 
+  // Append the image blob to the form data with the field name "image" and a filename of "image.jpg".
+  // we do not need it to specificly be a .jpg file, but some filename is required by the server code to process the upload.
   form.append("image", blobRep, "image.jpg");
 
+  // Send the image blob to the server for analysis using the blob endpoint.
   const serverRes = await fetch(`${SERVER_URL}/analyze/blob`, {
     method: "POST",
     body: form,
@@ -97,6 +99,7 @@ async function requestImageAnalysisByBlob(imageUrl) {
 
   const data = await readServerPayload(serverRes);
 
+  //best practice check.
   if (!serverRes.ok) {
     throw new Error(`Server failed: ${serverRes.status} ${data?.error || ""}`);
   }
@@ -112,8 +115,12 @@ async function requestImageAnalysisByBlob(imageUrl) {
  * @returns {Promise<void>}
  */
 async function handleAnalyzeImageMessage(msg, sendResponse) {
+
   try {
+    // First attempt to analyze the image using the original URL. This is more efficient and preserves metadata when it works.
+
     const url = new URL(msg.url);
+    // Check if the URL is a remote URL (http or https). If it's not, we should skip directly to the blob upload method since the server won't be able to access it.
     const isRemoteUrl = url.protocol === "http:" || url.protocol === "https:";
     let data;
 
@@ -125,6 +132,7 @@ async function handleAnalyzeImageMessage(msg, sendResponse) {
       data = await requestImageAnalysisByBlob(msg.url);
     }
 
+    // If we have data at this point, it means the analysis succeeded either by URL or blob method. We can send the description back to the content script.
     sendResponse({
       ok: true,
       // if .description is falsy (null, undefined,...) use (no description)
@@ -161,4 +169,5 @@ function onRuntimeMessage(msg, sender, sendResponse) {
   return true;
 }
 
+// Listen for messages from the content script.
 chrome.runtime.onMessage.addListener(onRuntimeMessage);

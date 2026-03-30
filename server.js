@@ -1,22 +1,22 @@
 /*
-  The purpose of this file is to provide a partial server solution for Server 3.
+  The purpose of this file is to provide a server solution for Phase 2.\
+  
+  comments for functions in this file are in JSDoc format, which is a common way to document JavaScript code.
+  you can find out all the translations here: https://jsdoc.app/tags-param.html - Gavin
 
-  author: Terry
+  author: Terry, Gavin, Ajay, Matt
 
 */
 
 import express from "express";
 import multer from "multer";
 import cors from "cors";
-// import OpenAi Software Development Kit (SDK)
-// to pay for credits and get your own API key
-// go to the OpenAI Platform for billing
 import OpenAI from "openai";
 
-const PORT = 3067;
+const PORT = 3067; //TODO: maybe we should move this to the .env file as well, its not sensitive but helps with  deployments and scailing - Gavin
 const app = express();
 
-// keep uploads in memory and set a file size limit of 15MB
+// keep uploads in memory and set a file size limit of 15MB, 15MB is an arbitrary limit that should be large enough for most images while preventing abuse of the blob upload endpoint.
 const upload = multer({
   storage: multer.memoryStorage(),
   //                              1024 bytes
@@ -27,10 +27,13 @@ const upload = multer({
 });
 
 app.use(cors());
+// we limit max json size to prevent abuse.
 app.use(express.json({ limit: "1mb" }));
 
 // use your API key to
 // openAI supports jpg/jpeg, png, webp, and non-animated gif
+
+// if your getting errors around the .env access, you need to inject the enviroment file into node. run the additional arguement "--env-file=.env" when you start the server.
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 /**
@@ -39,9 +42,9 @@ const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
  * @param {string} imageUrl - The remote image URL or data URL to analyze.
  * @returns {Promise<string>} The textual description returned by OpenAI.
  */
-async function analyzeImage(imageUrl) {
+async function analyzeImage(imageUrl) { // maybe we make the ai think? might burn more tokens but be able to identify people better.
   const response = await openai.responses.create({
-    model: "gpt-4.1-mini",
+    model: "gpt-5.4-mini",
     input: [
       {
         role: "user",
@@ -64,7 +67,8 @@ async function analyzeImage(imageUrl) {
 
 /**
  * Aborts an in-flight fetch controller.
- *
+ * more descriptive function name, just wraping the .abort method.
+ * 
  * @param {AbortController} controller - The controller to abort.
  * @returns {void}
  */
@@ -79,6 +83,7 @@ function abortFetch(controller) {
  * @returns {Promise<boolean>} `true` when the server can fetch the image URL.
  */
 async function canUseImageUrl(imageUrl) {
+  //we use the abort controller to protect against slow servers or large files that could tie up our server resources. 5 seconds is an arbitrary timeout.
   const controller = new AbortController();
   const timeout = setTimeout(abortFetch, 5000, controller);
 
@@ -150,8 +155,9 @@ async function handleAnalyzeBlobRequest(req, res) {
     if (!req.file) {
       return res.status(400).json({ error: "No image uploaded" });
     }
-
+    // basic verification that its us, if they use a different mime type we know its not us.
     const mime = req.file.mimetype || "image/jpeg";
+    //inline conversion of the data to a data URL.
     const dataUrl = `data:${mime};base64,${req.file.buffer.toString("base64")}`;
     const description = await analyzeImage(dataUrl);
 
@@ -168,7 +174,7 @@ async function handleAnalyzeBlobRequest(req, res) {
  * @returns {void}
  */
 function logServerStart() {
-  console.log("✅ Server running at http://mapd.cs-smu.ca:3026");
+  console.log("[LOG]: Server running at http://mapd.cs-smu.ca:3067");
 }
 
 app.post("/analyze", handleAnalyzeRequest);

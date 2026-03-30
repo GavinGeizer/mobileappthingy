@@ -4,7 +4,10 @@
   Note that this extension uses an endpoint different than the server code given.
   manifest.json must be updated to test your server code.
 
-    Author: Terry
+  comments for functions in this file are in JSDoc format, which is a common way to document JavaScript code.
+  you can find out all the translations here: https://jsdoc.app/tags-param.html - Gavin
+
+  Author: Terry, Gavin, Ajay, Matt
 */
 
 /* global variables */
@@ -12,13 +15,9 @@ let globalVoices = [];
 let pressTimer = null;
 
 /* global constants */
-const LONG_PRESS_MS = 600; // 0.6 sec gives a safe margin of the typical 0.5 sec
+const LONG_PRESS_MS = 600; // 0.6 sec gives a safe margin of the typical 0.5 sec, we can easily adjust this if we find it is too short or long during testing.
 const LANGUAGE_NAME = "Google UK English Female"; // client preferred soft female voice
 
-/*
-  The purpose of this function is to get the array of voices available
-  in this version of Google Chrome.
-*/
 /**
  * Loads the currently available speech synthesis voices into memory.
  *
@@ -35,6 +34,8 @@ function loadVoices() {
  * @returns {target is HTMLImageElement} `true` when the target is an image element.
  */
 function isImageElement(target) {
+  // HTMLImageElement is a built-in interface that represents <img> elements in the DOM.
+  // better to break this out into a function for readability.
   return target instanceof HTMLImageElement;
 }
 
@@ -99,31 +100,23 @@ function runLongPressAnalysis(img, event) {
 speechSynthesis.onvoiceschanged = loadVoices; // wait for event
 loadVoices(); // try right away just in case. But you might get an empty array []
 
-/*
-    This event listener acts when an image is "long pressed"
-
-    e - the event object created by the pointertdown event
-      - contains field e.target which is the element that was directly pressed
-*/
 /**
  * Starts the long-press timer when the user presses an image.
  *
- * @param {PointerEvent} e - The pointer event fired by the document.
+ * @param {PointerEvent} pointerEvent - The pointer event fired by the document.
  * @returns {void}
  */
-function handlePointerDown(e) {
-  const img = e.target;
+function handlePointerDown(pointerEvent) {
+  const img = pointerEvent.target;
   // if img is null or undefined or img.tagName is not IMG return
   if (!isImageElement(img)) return;
 
-  pressTimer = setTimeout(runLongPressAnalysis, LONG_PRESS_MS, img, e);
+  pressTimer = setTimeout(runLongPressAnalysis, LONG_PRESS_MS, img, pointerEvent);
 }
 
-/*
-  These event listeners work to cancel the long press event
-*/
 /**
  * Clears the active long-press timer.
+ * we use this function for readability.
  *
  * @returns {void}
  */
@@ -131,17 +124,14 @@ function clearPressTimer() {
   clearTimeout(pressTimer);
 }
 
-/*
-  Stop the context menu appearing due to a long-press.
-*/
 /**
  * Prevents the browser context menu from appearing on long press.
  *
- * @param {MouseEvent} e - The context menu event fired by the document.
+ * @param {MouseEvent} pointerEvent - The context menu event fired by the document.
  * @returns {void}
  */
-function handleContextMenu(e) {
-  e.preventDefault();
+function handleContextMenu(pointerEvent) {
+  pointerEvent.preventDefault();
 }
 
 /**
@@ -182,6 +172,7 @@ function speak(text) {
   speechSynthesis.speak(u);
 }
 
+// Listen for messages from the content script.
 document.addEventListener("pointerdown", handlePointerDown);
 document.addEventListener("pointerup", clearPressTimer);
 document.addEventListener("pointercancel", clearPressTimer);
