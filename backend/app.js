@@ -8,7 +8,8 @@ export const DEFAULT_PORT = 3067;
 export const MAX_UPLOAD_BYTES = 15 * 1024 * 1024;
 export const URL_FETCH_TIMEOUT_MS = 5000;
 export const ANALYSIS_MODEL = "gpt-5.4-mini";
-export const IMAGE_DESCRIPTION_PROMPT = `Describe this image as if speaking to someone who cannot see it.
+export const IMAGE_DESCRIPTION_PROMPT = `
+Describe this image as if speaking to someone who cannot see it.
 
 Focus on what matters most:
 - Main subject or focal point
@@ -71,29 +72,28 @@ function getStatusCodeForError(error) {
   return error?.message === "OPENAI_API_KEY is not set" ? 503 : 500;
 }
 
-function respondWithJsonError(req, res, status, logMessage, payload, details) {
-  logDebug(`${getRequestTag(req)} ${logMessage}`, details);
-  return res.status(status).json(payload);
-}
-
-function respondWithRouteFailure(req, res, routeLabel, error) {
+function logRouteFailure(req, routeLabel, error) {
   logDebug(`${getRequestTag(req)} ${routeLabel} failed`, {
     error: getErrorMessage(error),
   });
   console.error(error);
+}
+
+function sendErrorResponse(req, res, {
+  status,
+  clientMessage,
+  logMessage,
+  details,
+}) {
+  logDebug(`${getRequestTag(req)} ${logMessage}`, details);
+  return res.status(status).json({ error: clientMessage });
+}
+
+function sendServerError(req, res, routeLabel, error) {
+  logRouteFailure(req, routeLabel, error);
   return res.status(getStatusCodeForError(error)).json({
     error: getErrorMessage(error),
   });
-}
-
-function wrapRoute(routeLabel, handler) {
-  return async function wrappedRoute(req, res) {
-    try {
-      await handler(req, res);
-    } catch (error) {
-      return respondWithRouteFailure(req, res, routeLabel, error);
-    }
-  };
 }
 
 function attachRequestLogging(app) {
@@ -291,6 +291,181 @@ function sendCachedResponse(req, res, cachedResponse) {
   return res.status(cachedResponse.statusCode).json(cachedResponse.payload);
 }
 
+function buildBlobFallbackPayload() {
+  return {
+    error: "Server could not access the image URL. Upload the blob instead.",
+    needsBlob: true,
+  };
+}
+
+function sendBlobFallbackResponse(req, res, payload) {
+  logDebug(`${getRequestTag(req)} Rejecting analyze URL request: image URL inaccessible`);
+  return res.status(409).json(payload);
+}
+
+function createMulterUpload() {
+  return multer({
+    storage: multer.memoryStorage(),
+    limits: { fileSize: MAX_UPLOAD_BYTES },
+  });
+}
+
+function createAnalyzeUrlHandler({ analyzeImage, canUseImageUrl, cache }) {
+  return async function analyzeUrlHandler(req, res) {
+    const requestTag = getRequestTag(req);
+    const imageUrl = req.body?.imageUrl;
+
+    logDebug(`${requestTag} Received analyze URL request`, {
+      hasImageUrl: Boolean(imageUrl),
+      imageUrl: summarizeText(imageUrl),
+    });
+
+    if (!imageUrl) {
+      return sendErrorResponse(req, res, {
+        status: 400,
+        clientMessage: "No image URL provided",
+        logMessage: "Rejecting analyze URL request: missing imageUrl",
+      });
+    }
+
+    if (!isHttpUrl(imageUrl)) {
+      return sendErrorResponse(req, res, {
+        status: 400,
+        clientMessage: "imageUrl must be an http or https URL",
+        logMessage: "Rejecting analyze URL request: invalid protocol",
+        details: { imageUrl: summarizeText(imageUrl) },
+      });
+    }
+
+    const cacheKey = createUrlCacheKey(imageUrl);
+    const cachedResponse = readCachedResponse(cache, { key: cacheKey, requestTag });
+
+    if (cachedResponse) {
+      return sendCachedResponse(req, res, cachedResponse);
+    }
+
+    try {
+      const urlIsUsable = await canUseImageUrl(imageUrl, { requestTag });
+
+      if (!urlIsUsable) {
+        const payload = buildBlobFallbackPayload();
+
+        writeCachedResponse(cache, {
+          key: cacheKey,
+          entryType: "url",
+          statusCode: 409,
+          payload,
+          requestTag,
+        });
+
+        return sendBlobFallbackResponse(req, res, payload);
+      }
+
+      const description = await analyzeImage(imageUrl, { requestTag });
+      const payload = { description, source: "url" };
+
+      writeCachedResponse(cache, {
+        key: cacheKey,
+        entryType: "url",
+        statusCode: 200,
+        payload,
+        requestTag,
+      });
+
+      logDebug(`${requestTag} Sending analyze url response`, {
+        descriptionLength: description.length,
+      });
+
+      return res.json(payload);
+    } catch (error) {
+      return sendServerError(req, res, "Analyze URL request", error);
+    }
+  };
+}
+
+function createAnalyzeBlobHandler({ analyzeImage, cache }) {
+  return async function analyzeBlobHandler(req, res) {
+    const requestTag = getRequestTag(req);
+
+    logDebug(`${requestTag} Received analyze blob request`, {
+      hasFile: Boolean(req.file),
+      fileName: req.file?.originalname || null,
+      mimeType: req.file?.mimetype || null,
+      size: req.file?.size || 0,
+    });
+
+    if (!req.file) {
+      return sendErrorResponse(req, res, {
+        status: 400,
+        clientMessage: "No image uploaded",
+        logMessage: "Rejecting analyze blob request: no file uploaded",
+      });
+    }
+
+    const { mimeType, dataUrl } = createImageDataUrl(req.file);
+
+    if (!mimeType.startsWith("image/")) {
+      return sendErrorResponse(req, res, {
+        status: 400,
+        clientMessage: "Uploaded file must be an image",
+        logMessage: "Rejecting analyze blob request: uploaded file is not an image",
+        details: { mimeType },
+      });
+    }
+
+    const cacheKey = createBlobCacheKey(req.file.buffer);
+    const cachedResponse = readCachedResponse(cache, { key: cacheKey, requestTag });
+
+    if (cachedResponse) {
+      return sendCachedResponse(req, res, cachedResponse);
+    }
+
+    logDebug(`${requestTag} Prepared image data URL from upload`, {
+      mimeType,
+      fileSize: req.file.size,
+      dataUrlLength: dataUrl.length,
+    });
+
+    try {
+      const description = await analyzeImage(dataUrl, { requestTag });
+      const payload = { description, source: "blob" };
+
+      writeCachedResponse(cache, {
+        key: cacheKey,
+        entryType: "blob",
+        statusCode: 200,
+        payload,
+        requestTag,
+      });
+
+      logDebug(`${requestTag} Sending analyze blob response`, {
+        descriptionLength: description.length,
+      });
+
+      return res.json(payload);
+    } catch (error) {
+      return sendServerError(req, res, "Analyze blob request", error);
+    }
+  };
+}
+
+function handleUploadError(error, req, res, next) {
+  if (!(error instanceof multer.MulterError)) {
+    next(error);
+    return;
+  }
+
+  const message = error.code === "LIMIT_FILE_SIZE"
+    ? "Uploaded image exceeds the 15 MB limit"
+    : error.message;
+
+  logDebug(`${getRequestTag(req)} Multer error handled`, {
+    code: error.code,
+    message,
+  });
+  res.status(400).json({ error: message });
+}
+
 export function createApp({
   analyzeImage,
   canUseImageUrl,
@@ -305,183 +480,18 @@ export function createApp({
   }
 
   const app = express();
-  const upload = multer({
-    storage: multer.memoryStorage(),
-    limits: { fileSize: MAX_UPLOAD_BYTES },
-  });
+  const upload = createMulterUpload();
 
   attachRequestLogging(app);
 
   app.use(cors());
   app.use(express.json({ limit: "1mb" }));
 
-  async function sendAnalysisResponse(req, res, imageUrl, source, cacheContext) {
-    const requestTag = getRequestTag(req);
-    const description = await analyzeImage(imageUrl, { requestTag });
-    const payload = { description, source };
+  app.post("/analyze", createAnalyzeUrlHandler({ analyzeImage, canUseImageUrl, cache }));
+  app.post("/analyze/blob", upload.single("image"), createAnalyzeBlobHandler({ analyzeImage, cache }));
 
-    writeCachedResponse(cache, {
-      key: cacheContext.key,
-      entryType: cacheContext.entryType,
-      statusCode: 200,
-      payload,
-      requestTag,
-    });
-
-    logDebug(`${requestTag} Sending analyze ${source} response`, {
-      descriptionLength: description.length,
-    });
-
-    return res.json(payload);
-  }
-
-  const handleAnalyzeRequest = wrapRoute("Analyze URL request", async (req, res) => {
-    const requestTag = getRequestTag(req);
-    const imageUrl = req.body?.imageUrl;
-
-    logDebug(`${requestTag} Received analyze URL request`, {
-      hasImageUrl: Boolean(imageUrl),
-      imageUrl: summarizeText(imageUrl),
-    });
-
-    if (!imageUrl) {
-      return respondWithJsonError(
-        req,
-        res,
-        400,
-        "Rejecting analyze URL request: missing imageUrl",
-        { error: "No image URL provided" }
-      );
-    }
-
-    if (!isHttpUrl(imageUrl)) {
-      return respondWithJsonError(
-        req,
-        res,
-        400,
-        "Rejecting analyze URL request: invalid protocol",
-        { error: "imageUrl must be an http or https URL" },
-        { imageUrl: summarizeText(imageUrl) }
-      );
-    }
-
-    const cacheContext = {
-      key: createUrlCacheKey(imageUrl),
-      entryType: "url",
-    };
-    const cachedResponse = readCachedResponse(cache, {
-      key: cacheContext.key,
-      requestTag,
-    });
-
-    if (cachedResponse) {
-      return sendCachedResponse(req, res, cachedResponse);
-    }
-
-    if (!(await canUseImageUrl(imageUrl, { requestTag }))) {
-      const payload = {
-        error: "Server could not access the image URL. Upload the blob instead.",
-        needsBlob: true,
-      };
-
-      writeCachedResponse(cache, {
-        key: cacheContext.key,
-        entryType: cacheContext.entryType,
-        statusCode: 409,
-        payload,
-        requestTag,
-      });
-
-      return respondWithJsonError(
-        req,
-        res,
-        409,
-        "Rejecting analyze URL request: image URL inaccessible",
-        payload
-      );
-    }
-
-    return sendAnalysisResponse(req, res, imageUrl, "url", cacheContext);
-  });
-
-  const handleAnalyzeBlobRequest = wrapRoute("Analyze blob request", async (req, res) => {
-    const requestTag = getRequestTag(req);
-
-    logDebug(`${requestTag} Received analyze blob request`, {
-      hasFile: Boolean(req.file),
-      fileName: req.file?.originalname || null,
-      mimeType: req.file?.mimetype || null,
-      size: req.file?.size || 0,
-    });
-
-    if (!req.file) {
-      return respondWithJsonError(
-        req,
-        res,
-        400,
-        "Rejecting analyze blob request: no file uploaded",
-        { error: "No image uploaded" }
-      );
-    }
-
-    const { mimeType, dataUrl } = createImageDataUrl(req.file);
-
-    if (!mimeType.startsWith("image/")) {
-      return respondWithJsonError(
-        req,
-        res,
-        400,
-        "Rejecting analyze blob request: uploaded file is not an image",
-        { error: "Uploaded file must be an image" },
-        { mimeType }
-      );
-    }
-
-    const cacheContext = {
-      key: createBlobCacheKey(req.file.buffer),
-      entryType: "blob",
-    };
-    const cachedResponse = readCachedResponse(cache, {
-      key: cacheContext.key,
-      requestTag,
-    });
-
-    if (cachedResponse) {
-      return sendCachedResponse(req, res, cachedResponse);
-    }
-
-    logDebug(`${requestTag} Prepared image data URL from upload`, {
-      mimeType,
-      fileSize: req.file.size,
-      dataUrlLength: dataUrl.length,
-    });
-
-    return sendAnalysisResponse(req, res, dataUrl, "blob", cacheContext);
-  });
-
-  function handleServerError(error, req, res, next) {
-    if (error instanceof multer.MulterError) {
-      const message = error.code === "LIMIT_FILE_SIZE"
-        ? "Uploaded image exceeds the 15 MB limit"
-        : error.message;
-
-      logDebug(`${getRequestTag(req)} Multer error handled`, {
-        code: error.code,
-        message,
-      });
-      return res.status(400).json({ error: message });
-    }
-
-    if (error) {
-      return respondWithRouteFailure(req, res, "Unhandled server error", error);
-    }
-
-    next();
-  }
-
-  app.post("/analyze", handleAnalyzeRequest);
-  app.post("/analyze/blob", upload.single("image"), handleAnalyzeBlobRequest);
-  app.use(handleServerError);
+  app.use(handleUploadError);
+  app.use((error, req, res, _next) => sendServerError(req, res, "Unhandled server error", error));
 
   return app;
 }

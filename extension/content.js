@@ -1,11 +1,10 @@
+const ANALYZE_IMAGE_MESSAGE = "ANALYZE_IMAGE_URL";
 const LONG_PRESS_MS = 600;
 const SUPPRESSION_WINDOW_MS = 1000;
 const REQUEST_IMPACT_DURATION_MS = 420;
 const REQUEST_IMPACT_SIZE_PX = 18;
 const PREFERRED_VOICE_NAME = "Google UK English Female";
 
-// Keep the mutable bits together so the event handlers do not have to manage
-// several unrelated globals.
 const state = {
   availableVoices: [],
   impactLayer: null,
@@ -33,8 +32,6 @@ function isPointWithinRect(x, y, rect) {
   return x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom;
 }
 
-// Only resolve images that are actually under the pointer so a long press on
-// the page background does not accidentally target the first image on the page.
 function findImageAtPoint(node, x, y) {
   if (isUsableImage(node) && isPointWithinRect(x, y, node.getBoundingClientRect())) {
     return node;
@@ -73,9 +70,6 @@ function getEventImage(event) {
   return null;
 }
 
-// Send viewport-relative bounds so the background script can crop the matching
-
-// region out of a screenshot if the original image URL is not directly usable.
 function getImageCaptureArea(image) {
   const rect = image.getBoundingClientRect();
 
@@ -88,7 +82,7 @@ function getImageCaptureArea(image) {
     viewportHeight: window.innerHeight,
   };
 }
-// AI GENERATED CONTENT: The impact layer is a single shared element that the content script
+
 function ensureImpactLayer() {
   if (state.impactLayer?.isConnected) {
     return state.impactLayer;
@@ -100,6 +94,8 @@ function ensureImpactLayer() {
     return null;
   }
 
+  // Reuse one top-level container so each request can add a tiny temporary
+  // animation without polluting the page with permanent DOM nodes.
   const layer = document.createElement("div");
   layer.setAttribute("aria-hidden", "true");
   layer.style.cssText = [
@@ -117,8 +113,6 @@ function ensureImpactLayer() {
   return layer;
 }
 
-// Keep the visual feedback lightweight and self-contained so the content
-// script does not need extra stylesheets or assets.
 function showRequestImpact(x, y) {
   const layer = ensureImpactLayer();
 
@@ -203,7 +197,6 @@ function showRequestImpact(x, y) {
   }, REQUEST_IMPACT_DURATION_MS);
 }
 
-//END AI GENERATED CONTENT
 async function analyzePressedImage(image) {
   try {
     const imageUrl = getImageUrl(image);
@@ -213,7 +206,7 @@ async function analyzePressedImage(image) {
     }
 
     const response = await chrome.runtime.sendMessage({
-      type: "ANALYZE_IMAGE_URL",
+      type: ANALYZE_IMAGE_MESSAGE,
       url: imageUrl,
       captureArea: getImageCaptureArea(image),
     });
@@ -261,13 +254,13 @@ function handlePointerDown(event) {
 
   clearLongPressTimer();
 
-  // Delay the analysis so normal taps still behave normally unless the user
-  // intentionally holds the press long enough to request narration.
   const pressPoint = {
     x: event.clientX,
     y: event.clientY,
   };
 
+  // Normal taps should pass through untouched. Only a held press should kick
+  // off narration and suppress the page's default image UI.
   state.longPressTimer = setTimeout(() => {
     state.longPressTimer = null;
     armDefaultUiSuppression();
@@ -295,8 +288,6 @@ function handleContextMenu(event) {
   event.preventDefault();
 }
 
-// Speech output is intentionally centralized so voice selection stays
-// consistent no matter which analysis path produced the description.
 function speak(text) {
   speechSynthesis.cancel();
 
@@ -306,9 +297,7 @@ function speak(text) {
   utterance.pitch = 1.0;
   utterance.volume = 1.0;
 
-  const preferredVoice = state.availableVoices.find((voice) => (
-    voice.name === PREFERRED_VOICE_NAME
-  ));
+  const preferredVoice = state.availableVoices.find((voice) => voice.name === PREFERRED_VOICE_NAME);
 
   if (preferredVoice) {
     utterance.voice = preferredVoice;

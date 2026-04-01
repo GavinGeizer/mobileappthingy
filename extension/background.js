@@ -17,7 +17,7 @@ function buildServerError(status, data) {
   return new Error(`Server failed: ${status} ${data?.error || ""}`.trim());
 }
 
-async function requestServer(path, init) {
+async function fetchServer(path, init) {
   try {
     return await fetch(`${SERVER_URL}${path}`, init);
   } catch {
@@ -25,7 +25,7 @@ async function requestServer(path, init) {
   }
 }
 
-async function readServerPayload(response) {
+async function readServerData(response) {
   const contentType = response.headers.get("content-type") || "";
 
   if (contentType.includes("application/json")) {
@@ -37,33 +37,23 @@ async function readServerPayload(response) {
   };
 }
 
-// Keep the low-level server call and payload parsing together so each analysis
-// path can focus on its own fallback logic.
-async function requestServerData(path, init) {
-  const response = await requestServer(path, init);
-  const data = await readServerPayload(response);
+async function sendServerRequest(path, init) {
+  const response = await fetchServer(path, init);
+  const data = await readServerData(response);
 
   return { response, data };
 }
 
-function ensureSuccessfulServerResponse(response, data, { allowBlobFallback = false } = {}) {
-  if (response.ok || (allowBlobFallback && data?.needsBlob)) {
+function requireSuccessfulResponse(response, data, { allowBlobFallback = false } = {}) {
+  if (response.ok) {
+    return data;
+  }
+
+  if (allowBlobFallback && data?.needsBlob) {
     return data;
   }
 
   throw buildServerError(response.status, data);
-}
-
-async function requestImageAnalysisByUrl(imageUrl) {
-  const { response, data } = await requestServerData("/analyze", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({ imageUrl }),
-  });
-
-  return ensureSuccessfulServerResponse(response, data, { allowBlobFallback: true });
 }
 
 function isRemoteUrl(url) {
@@ -97,8 +87,6 @@ function clamp(value, min, max) {
   return Math.min(Math.max(value, min), max);
 }
 
-// The screenshot can be a different pixel size than the page viewport, so the
-// DOM rectangle from the content script must be scaled before cropping.
 function getScaledCaptureBounds(captureArea, screenshotBitmap) {
   const scaleX = screenshotBitmap.width / captureArea.viewportWidth;
   const scaleY = screenshotBitmap.height / captureArea.viewportHeight;
@@ -123,6 +111,52 @@ function getScaledCaptureBounds(captureArea, screenshotBitmap) {
   };
 }
 
+async function requestImageAnalysisByUrl(imageUrl) {
+  const { response, data } = await sendServerRequest("/analyze", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ imageUrl }),
+  });
+
+  return requireSuccessfulResponse(response, data, { allowBlobFallback: true });
+}
+
+async function fetchImageBlob(imageUrl) {
+  let imageResponse;
+
+  try {
+    imageResponse = await fetch(imageUrl);
+  } catch (error) {
+    throw new Error(`Extension could not fetch the image directly: ${getErrorMessage(error)}`);
+  }
+
+  if (!imageResponse.ok) {
+    throw new Error(`Image fetch failed: ${imageResponse.status}`);
+  }
+
+  const contentType = (imageResponse.headers.get("content-type") || "").toLowerCase();
+
+  if (contentType && !contentType.startsWith("image/")) {
+    throw new Error(`Fetched resource is not an image: ${contentType}`);
+  }
+
+  return imageResponse.blob();
+}
+
+async function requestImageAnalysisByBlob(imageBlob, fileName) {
+  const form = new FormData();
+  form.append("image", imageBlob, fileName);
+
+  const { response, data } = await sendServerRequest("/analyze/blob", {
+    method: "POST",
+    body: form,
+  });
+
+  return requireSuccessfulResponse(response, data);
+}
+
 async function captureImageBlob(captureArea, windowId) {
   if (!isValidCaptureArea(captureArea)) {
     throw new Error("Missing image capture details from the page");
@@ -134,7 +168,8 @@ async function captureImageBlob(captureArea, windowId) {
   const screenshotBitmap = await createImageBitmap(screenshotBlob);
 
   try {
-    // Translate the DOM rectangle into actual screenshot pixels before cropping.
+    // The DOM rectangle is in viewport coordinates, so scale it to the actual
+    // screenshot size before cropping.
     const bounds = getScaledCaptureBounds(captureArea, screenshotBitmap);
 
     if (bounds.width <= 0 || bounds.height <= 0) {
@@ -166,40 +201,6 @@ async function captureImageBlob(captureArea, windowId) {
   }
 }
 
-async function fetchImageBlob(imageUrl) {
-  let imageResponse;
-
-  try {
-    imageResponse = await fetch(imageUrl);
-  } catch (error) {
-    throw new Error(`Extension could not fetch the image directly: ${getErrorMessage(error)}`);
-  }
-
-  if (!imageResponse.ok) {
-    throw new Error(`Image fetch failed: ${imageResponse.status}`);
-  }
-
-  const contentType = (imageResponse.headers.get("content-type") || "").toLowerCase();
-
-  if (contentType && !contentType.startsWith("image/")) {
-    throw new Error(`Fetched resource is not an image: ${contentType}`);
-  }
-
-  return imageResponse.blob();
-}
-
-async function requestImageAnalysisByBlob(imageBlob, fileName) {
-  const form = new FormData();
-  form.append("image", imageBlob, fileName);
-
-  const { response, data } = await requestServerData("/analyze/blob", {
-    method: "POST",
-    body: form,
-  });
-
-  return ensureSuccessfulServerResponse(response, data);
-}
-
 async function requestImageAnalysisByScreenshot(captureArea, sender) {
   const windowId = sender.tab?.windowId;
 
@@ -207,17 +208,17 @@ async function requestImageAnalysisByScreenshot(captureArea, sender) {
     throw new Error("Cannot capture the current tab");
   }
 
-  const capturedImage = await captureImageBlob(captureArea, windowId);
-  return requestImageAnalysisByBlob(capturedImage, "client-capture.png");
+  const screenshotBlob = await captureImageBlob(captureArea, windowId);
+  return requestImageAnalysisByBlob(screenshotBlob, "client-capture.png");
 }
 
-function buildAnalysisStrategies(message, sender) {
-  const strategies = [];
+function createAnalysisSteps(message, sender) {
+  const steps = [];
 
-  // Try the cheapest path first, then fall back to client-side uploads if the
-  // backend cannot reach the image directly.
+  // Try the cheapest backend path first. If the server cannot reach the image,
+  // fall back to uploading bytes from the browser.
   if (isRemoteUrl(message.url)) {
-    strategies.push({
+    steps.push({
       label: "backend URL analysis",
       run: async () => {
         const data = await requestImageAnalysisByUrl(message.url);
@@ -231,7 +232,7 @@ function buildAnalysisStrategies(message, sender) {
     });
   }
 
-  strategies.push({
+  steps.push({
     label: "extension image fetch upload",
     run: async () => {
       const imageBlob = await fetchImageBlob(message.url);
@@ -239,12 +240,12 @@ function buildAnalysisStrategies(message, sender) {
     },
   });
 
-  strategies.push({
+  steps.push({
     label: "tab screenshot upload",
     run: async () => requestImageAnalysisByScreenshot(message.captureArea, sender),
   });
 
-  return strategies;
+  return steps;
 }
 
 async function resolveImageAnalysis(message, sender) {
@@ -254,15 +255,13 @@ async function resolveImageAnalysis(message, sender) {
 
   const errors = [];
 
-  // Walk the fallback chain in order and keep every failure message so the user
-  // gets a single actionable error if all strategies fail.
-  for (const strategy of buildAnalysisStrategies(message, sender)) {
+  for (const step of createAnalysisSteps(message, sender)) {
     try {
-      return await strategy.run();
+      return await step.run();
     } catch (error) {
-      const message = `${strategy.label}: ${getErrorMessage(error)}`;
-      console.warn(`[background] ${message}`);
-      errors.push(message);
+      const stepError = `${step.label}: ${getErrorMessage(error)}`;
+      console.warn(`[background] ${stepError}`);
+      errors.push(stepError);
     }
   }
 
