@@ -201,20 +201,52 @@ export function createServerServices({
         imageUrl: summarizeText(imageUrl),
       });
 
-      const response = await fetchImpl(imageUrl, { signal: controller.signal });
-      const contentType = (response.headers.get("content-type") || "").toLowerCase();
-      const looksLikeImage = contentType === "" || contentType.startsWith("image/");
+      const headResponse = await fetchImpl(imageUrl, {
+        method: "HEAD",
+        signal: controller.signal,
+      });
+      const headContentType = (headResponse.headers.get("content-type") || "").toLowerCase();
+      const headHasUsefulHeaders = headContentType !== "";
+      const headLooksLikeImage = headContentType.startsWith("image/");
+      const shouldFallbackToRangeGet =
+        headResponse.status === 405 || headResponse.status === 501 || !headHasUsefulHeaders;
 
-      await response.body?.cancel?.();
+      await headResponse.body?.cancel?.();
 
-      logDebug(`${requestTag} Image URL fetch completed`, {
-        ok: response.ok,
-        status: response.status,
-        contentType: contentType || "(missing)",
-        looksLikeImage,
+      logDebug(`${requestTag} Image URL HEAD probe completed`, {
+        ok: headResponse.ok,
+        status: headResponse.status,
+        contentType: headContentType || "(missing)",
+        looksLikeImage: headLooksLikeImage,
+        shouldFallbackToRangeGet,
       });
 
-      return response.ok && looksLikeImage;
+      if (headResponse.ok && headLooksLikeImage) {
+        return true;
+      }
+
+      if (!shouldFallbackToRangeGet) {
+        return false;
+      }
+
+      const getResponse = await fetchImpl(imageUrl, {
+        method: "GET",
+        headers: { Range: "bytes=0-1023" },
+        signal: controller.signal,
+      });
+      const getContentType = (getResponse.headers.get("content-type") || "").toLowerCase();
+      const getLooksLikeImage = getContentType.startsWith("image/");
+
+      await getResponse.body?.cancel?.();
+
+      logDebug(`${requestTag} Image URL range GET probe completed`, {
+        ok: getResponse.ok,
+        status: getResponse.status,
+        contentType: getContentType || "(missing)",
+        looksLikeImage: getLooksLikeImage,
+      });
+
+      return getResponse.ok && getLooksLikeImage;
     } catch (error) {
       logDebug(`${requestTag} Image URL fetch failed`, {
         imageUrl: summarizeText(imageUrl),
