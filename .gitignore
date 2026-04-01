@@ -1,3 +1,5 @@
 /**/.env
 /**/node_modules
 /backend/scan-cache.sqlite*
+/.gocache
+/.gotmp
