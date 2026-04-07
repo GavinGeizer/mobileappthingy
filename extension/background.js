@@ -1,22 +1,28 @@
+/*
+made this file with some of the easiest to read code, forgive me if theres a lack of comments
+authors: @gavingeizer, matt, ajay.
+*/
+
 const SERVER_URL = "http://mapd.cs-smu.ca:3067";
 const ANALYZE_IMAGE_MESSAGE = "ANALYZE_IMAGE_URL";
 
+//self explanitory
 function getErrorMessage(error) {
   return error instanceof Error ? error.message : String(error);
 }
-
+//self explanitory
 function getServerUnavailableMessage() {
   return `Could not reach the backend at ${SERVER_URL}. Start the backend server and make sure it is listening on that port.`;
 }
-
+//self explanitory
 function collapseErrors(messages) {
   return [...new Set(messages.filter(Boolean))].join(". ");
 }
-
+//self explanitory
 function buildServerError(status, data) {
   return new Error(`Server failed: ${status} ${data?.error || ""}`.trim());
 }
-
+//self explanitory
 async function fetchServer(path, init) {
   try {
     return await fetch(`${SERVER_URL}${path}`, init);
@@ -24,7 +30,7 @@ async function fetchServer(path, init) {
     throw new Error(getServerUnavailableMessage());
   }
 }
-
+//self explanitory
 async function readServerData(response) {
   const contentType = response.headers.get("content-type") || "";
 
@@ -36,14 +42,14 @@ async function readServerData(response) {
     error: await response.text().catch(() => ""),
   };
 }
-
+//self explanitory, sends a request to the backend server with the specified path and options, and processes the response to extract either the expected data or an error message, providing a unified way to handle server communication and error reporting for the image analysis requests.
 async function sendServerRequest(path, init) {
   const response = await fetchServer(path, init);
   const data = await readServerData(response);
 
   return { response, data };
 }
-
+//self explanitory, checks the server response for success and either returns the data or throws an error with a message derived from the response, allowing the calling code to handle successful analysis results or gracefully manage errors that occur during the request.
 function requireSuccessfulResponse(response, data, { allowBlobFallback = false } = {}) {
   if (response.ok) {
     return data;
@@ -55,7 +61,7 @@ function requireSuccessfulResponse(response, data, { allowBlobFallback = false }
 
   throw buildServerError(response.status, data);
 }
-
+// client side check to determine if the provided URL is a remote URL that can be accessed by the backend server, which helps optimize the analysis process by allowing direct URL analysis when possible and falling back to blob uploads when necessary.
 function isRemoteUrl(url) {
   try {
     const protocol = new URL(url).protocol;
@@ -64,7 +70,7 @@ function isRemoteUrl(url) {
     return false;
   }
 }
-
+// Screenshot implementation, everything should be easily understood.
 function isValidCaptureArea(captureArea) {
   const numericFields = [
     "left",
@@ -110,7 +116,9 @@ function getScaledCaptureBounds(captureArea, screenshotBitmap) {
     height: bottom - top,
   };
 }
+// end screenshot implementation
 
+// requests image analysis from the backend server by first trying to analyze the image via its URL, and if the server indicates that it cannot access the URL, it falls back to fetching the image as a blob and uploading it for analysis, allowing for a more robust handling of different image sources and server accessibility scenarios.
 async function requestImageAnalysisByUrl(imageUrl) {
   const { response, data } = await sendServerRequest("/analyze", {
     method: "POST",
@@ -123,6 +131,7 @@ async function requestImageAnalysisByUrl(imageUrl) {
   return requireSuccessfulResponse(response, data, { allowBlobFallback: true });
 }
 
+// checks if the blob works
 async function fetchImageBlob(imageUrl) {
   let imageResponse;
 
@@ -145,6 +154,7 @@ async function fetchImageBlob(imageUrl) {
   return imageResponse.blob();
 }
 
+//blob implementation of request
 async function requestImageAnalysisByBlob(imageBlob, fileName) {
   const form = new FormData();
   form.append("image", imageBlob, fileName);
@@ -156,7 +166,7 @@ async function requestImageAnalysisByBlob(imageBlob, fileName) {
 
   return requireSuccessfulResponse(response, data);
 }
-
+//actual screenshot
 async function captureImageBlob(captureArea, windowId) {
   if (!isValidCaptureArea(captureArea)) {
     throw new Error("Missing image capture details from the page");
@@ -195,12 +205,12 @@ async function captureImageBlob(captureArea, windowId) {
       bounds.height
     );
 
-    return canvas.convertToBlob({ type: "image/png" });
+    return canvas.convertToBlob({ type: "image/png" }); //png to preserve quality for analysis
   } finally {
     screenshotBitmap.close();
   }
 }
-
+// virtually identical to the blob upload function, but with error handling specific to the screenshot capture process, allowing for a clear separation of concerns and more informative error messages when issues arise during the capture and processing of the screenshot for analysis.
 async function requestImageAnalysisByScreenshot(captureArea, sender) {
   const windowId = sender.tab?.windowId;
 
@@ -267,7 +277,7 @@ async function resolveImageAnalysis(message, sender) {
 
   throw new Error(collapseErrors(errors));
 }
-
+//self explanitory, handles the incoming message to analyze an image, resolves the analysis request, and sends the response back to the sender.
 async function handleAnalyzeImageMessage(message, sender, sendResponse) {
   try {
     const data = await resolveImageAnalysis(message, sender);
@@ -291,7 +301,7 @@ function onRuntimeMessage(message, sender, sendResponse) {
   }
 
   void handleAnalyzeImageMessage(message, sender, sendResponse);
-  return true;
+  return true; // Indicates that we will respond asynchronously
 }
 
 chrome.runtime.onMessage.addListener(onRuntimeMessage);

@@ -1,3 +1,4 @@
+Gavin, AJay, Matt
 # Server 3
 
 A small Chrome extension + Node backend that turns images into short spoken descriptions.

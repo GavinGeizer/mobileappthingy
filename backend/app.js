@@ -4,11 +4,19 @@ import multer from "multer";
 import OpenAI from "openai";
 import { createBlobCacheKey, createScanCache, createUrlCacheKey } from "./scanCache.js";
 
+/* 
+Main server application file. Defines the Express app, routes, and core services for analyzing images using OpenAI's API, with caching and error handling.
+we use the app.js file as its best practice. we call on this file from the server.js file.
+
+Authors: @gavingeizer, Ajay, Matt
+
+*/
+
 export const DEFAULT_PORT = 3067;
 export const MAX_UPLOAD_BYTES = 15 * 1024 * 1024;
 export const URL_FETCH_TIMEOUT_MS = 5000;
 export const ANALYSIS_MODEL = "gpt-5.4-mini";
-export const IMAGE_DESCRIPTION_PROMPT = `
+export const IMAGE_DESCRIPTION_PROMPT = ` 
 Describe this image as if speaking to someone who cannot see it.
 
 Focus on what matters most:
@@ -19,6 +27,7 @@ Focus on what matters most:
 
 Speak naturally and conversationally. Prioritize information that helps the listener understand the image's purpose and content. Keep it brief—aim for 2-3 sentences unless the image is complex.`;
 
+//load eniroment fuction, self explanitory.
 export function loadEnvironment() {
   try {
     process.loadEnvFile(new URL("./.env", import.meta.url));
@@ -32,11 +41,11 @@ export function loadEnvironment() {
     console.warn("Could not load backend/.env:", error);
   }
 }
-
+// get error message, self explanitory.
 export function getErrorMessage(error) {
   return error instanceof Error ? error.message : String(error);
 }
-
+// log debug message, self explanitory.
 export function logDebug(message, details) {
   const timestamp = new Date().toISOString();
 
@@ -48,6 +57,7 @@ export function logDebug(message, details) {
   console.log(`[${timestamp}] ${message}`, details);
 }
 
+// Test utilities
 function summarizeText(value, maxLength = 160) {
   if (typeof value !== "string") {
     return value;
@@ -56,10 +66,12 @@ function summarizeText(value, maxLength = 160) {
   return value.length > maxLength ? `${value.slice(0, maxLength)}...` : value;
 }
 
+// fun way of getting request tag for logging purposes
 function getRequestTag(req) {
   return `[req ${req.requestId ?? "?"}]`;
 }
 
+// Determine appropriate HTTP status code for an error, with special handling for known cases
 function getStatusCodeForError(error) {
   if (Number.isInteger(error?.statusCode)) {
     return error.statusCode;
@@ -72,6 +84,7 @@ function getStatusCodeForError(error) {
   return error?.message === "OPENAI_API_KEY is not set" ? 503 : 500;
 }
 
+// Log a route failure with error details, and print the error stack to the console for debugging
 function logRouteFailure(req, routeLabel, error) {
   logDebug(`${getRequestTag(req)} ${routeLabel} failed`, {
     error: getErrorMessage(error),
@@ -79,6 +92,7 @@ function logRouteFailure(req, routeLabel, error) {
   console.error(error);
 }
 
+// Send a standardized error response to the client, and log the error with a consistent format
 function sendErrorResponse(req, res, {
   status,
   clientMessage,
@@ -89,6 +103,7 @@ function sendErrorResponse(req, res, {
   return res.status(status).json({ error: clientMessage });
 }
 
+// Handle unexpected server errors by logging them and sending a generic error response to the client
 function sendServerError(req, res, routeLabel, error) {
   logRouteFailure(req, routeLabel, error);
   return res.status(getStatusCodeForError(error)).json({
@@ -96,6 +111,7 @@ function sendServerError(req, res, routeLabel, error) {
   });
 }
 
+// Express middleware to log incoming requests and their outcomes, including method, path, content type, status code, and duration
 function attachRequestLogging(app) {
   let nextRequestId = 0;
 
@@ -124,6 +140,7 @@ function attachRequestLogging(app) {
   });
 }
 
+// our implementation to check if url is valid.
 export function isHttpUrl(value) {
   try {
     const protocol = new URL(value).protocol;
@@ -133,6 +150,7 @@ export function isHttpUrl(value) {
   }
 }
 
+// build the request payload for the OpenAI image analysis endpoint, combining a fixed prompt with the provided image URL
 export function buildAnalysisInput(imageUrl) {
   return [
     {
@@ -151,6 +169,8 @@ export function buildAnalysisInput(imageUrl) {
   ];
 }
 
+
+// actually start the server, with the provided app and port, and log the startup configuration
 export function createServerServices({
   apiKey = process.env.OPENAI_API_KEY,
   openaiClient = apiKey ? new OpenAI({ apiKey }) : null,
@@ -159,6 +179,7 @@ export function createServerServices({
   analysisModel = ANALYSIS_MODEL,
   urlFetchTimeoutMs = URL_FETCH_TIMEOUT_MS,
 } = {}) {
+  // Helper function to get the OpenAI client, throwing an error if it's not configured
   function getOpenAIClient() {
     if (!openaiClient) {
       throw new Error("OPENAI_API_KEY is not set");
@@ -166,7 +187,7 @@ export function createServerServices({
 
     return openaiClient;
   }
-
+  // Analyze the image at the given URL using OpenAI's API, with logging and error handling
   async function analyzeImage(imageUrl, { requestTag = "[req ?]" } = {}) {
     const source = imageUrl.startsWith("data:") ? "blob" : "url";
 
@@ -192,6 +213,7 @@ export function createServerServices({
     return description;
   }
 
+  // Check if the provided image URL is accessible and looks like an image, using a HEAD request with a fallback to a range GET if necessary, and logging the process
   async function canUseImageUrl(imageUrl, { requestTag = "[req ?]" } = {}) {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), urlFetchTimeoutMs);
@@ -264,7 +286,7 @@ export function createServerServices({
     cache,
   };
 }
-
+// Helper function to create a data URL from an uploaded file buffer, including the MIME type for use in analysis
 function createImageDataUrl(file) {
   const mimeType = file.mimetype || "image/jpeg";
 
@@ -273,7 +295,7 @@ function createImageDataUrl(file) {
     dataUrl: `data:${mimeType};base64,${file.buffer.toString("base64")}`,
   };
 }
-
+// Safely read a cached response from the cache, with error handling to degrade gracefully if the cache is unavailable or throws an error
 function readCachedResponse(cache, { key, requestTag }) {
   if (!cache?.read) {
     return null;
@@ -290,7 +312,7 @@ function readCachedResponse(cache, { key, requestTag }) {
     return null;
   }
 }
-
+// Safely write a response to the cache, with error handling to degrade gracefully if the cache is unavailable or throws an error
 function writeCachedResponse(cache, { key, entryType, statusCode, payload, requestTag }) {
   if (!cache?.write) {
     return false;
@@ -313,7 +335,7 @@ function writeCachedResponse(cache, { key, entryType, statusCode, payload, reque
     return false;
   }
 }
-
+// Send a cached response to the client, with logging to indicate that the response is being served from cache
 function sendCachedResponse(req, res, cachedResponse) {
   logDebug(`${getRequestTag(req)} Sending cached response`, {
     entryType: cachedResponse.entryType,
@@ -322,26 +344,26 @@ function sendCachedResponse(req, res, cachedResponse) {
 
   return res.status(cachedResponse.statusCode).json(cachedResponse.payload);
 }
-
+// blob fallback request
 function buildBlobFallbackPayload() {
   return {
     error: "Server could not access the image URL. Upload the blob instead.",
     needsBlob: true,
   };
 }
-
+// also blob fallback response, with logging to indicate that the server is rejecting the URL analysis request and asking for a blob upload instead
 function sendBlobFallbackResponse(req, res, payload) {
   logDebug(`${getRequestTag(req)} Rejecting analyze URL request: image URL inaccessible`);
   return res.status(409).json(payload);
 }
-
+// multer
 function createMulterUpload() {
   return multer({
     storage: multer.memoryStorage(),
     limits: { fileSize: MAX_UPLOAD_BYTES },
   });
 }
-
+// URL request handeler, checks cache, validates URL, checks accessibility, analyzes image, and handles errors with appropriate responses and logging
 function createAnalyzeUrlHandler({ analyzeImage, canUseImageUrl, cache }) {
   return async function analyzeUrlHandler(req, res) {
     const requestTag = getRequestTag(req);
@@ -414,7 +436,7 @@ function createAnalyzeUrlHandler({ analyzeImage, canUseImageUrl, cache }) {
     }
   };
 }
-
+// Blob request handler, checks cache, validates upload, prepares data URL, analyzes image, and handles errors with appropriate responses and logging
 function createAnalyzeBlobHandler({ analyzeImage, cache }) {
   return async function analyzeBlobHandler(req, res) {
     const requestTag = getRequestTag(req);
@@ -481,6 +503,7 @@ function createAnalyzeBlobHandler({ analyzeImage, cache }) {
   };
 }
 
+// Express middleware to handle errors thrown by multer during file upload, translating them into appropriate HTTP responses and logging the error details
 function handleUploadError(error, req, res, next) {
   if (!(error instanceof multer.MulterError)) {
     next(error);
@@ -498,6 +521,7 @@ function handleUploadError(error, req, res, next) {
   res.status(400).json({ error: message });
 }
 
+// Main function to create the Express app, defining the routes and attaching the necessary middleware and handlers for analyzing images via URL or blob upload, with caching support
 export function createApp({
   analyzeImage,
   canUseImageUrl,
@@ -528,6 +552,7 @@ export function createApp({
   return app;
 }
 
+// log the server startup configuration, including port, OpenAI configuration status, cache path, and analysis model, with a warning if OpenAI is not configured
 export function logServerStart({
   port,
   openaiConfigured,
@@ -546,7 +571,7 @@ export function logServerStart({
     console.warn("OPENAI_API_KEY is not set. Image analysis requests will fail until it is configured.");
   }
 }
-
+// actually start the server, with the provided app and port, and log the startup configuration
 export function startServer(app, port, onListen) {
   return app.listen(port, onListen);
 }

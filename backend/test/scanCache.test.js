@@ -11,6 +11,9 @@ import {
   createUrlCacheKey,
 } from "../scanCache.js";
 
+// Small Test file to make sure we dont go insane, const are required to be in functions.
+// Author: @gavingeizer
+
 async function createTempDir(prefix) {
   return mkdtemp(path.join(tmpdir(), prefix));
 }

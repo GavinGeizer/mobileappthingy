@@ -14,7 +14,7 @@ const port = Number(process.env.PORT) || DEFAULT_PORT;
 const apiKey = process.env.OPENAI_API_KEY;
 const services = createServerServices({ apiKey });
 const app = createApp(services);
-
+// log the server startup configuration, including port, OpenAI configuration status, cache path, and analysis model, with a warning if OpenAI is not configured
 startServer(app, port, () => {
   logServerStart({
     port,

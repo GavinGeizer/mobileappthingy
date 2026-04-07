@@ -1,3 +1,8 @@
+/*
+This content script is responsible for detecting long presses on images within web pages, sending the image URL to the background script for analysis, and providing visual feedback and narration of the analysis results. It listens for pointer events to identify long presses, checks if the target element is an image, and manages a temporary overlay animation to indicate when an analysis request has been triggered. The script also handles speech synthesis to read out the analysis results using a preferred voice if available.
+authors: @gavingeizer, matt, ajay.
+*/
+
 const ANALYZE_IMAGE_MESSAGE = "ANALYZE_IMAGE_URL";
 const LONG_PRESS_MS = 600;
 const SUPPRESSION_WINDOW_MS = 1000;
@@ -11,27 +16,28 @@ const state = {
   longPressTimer: null,
   suppressDefaultUiUntil: 0,
 };
-
+//self explanitory
 function loadVoices() {
   state.availableVoices = speechSynthesis.getVoices();
 }
-
+//self explanitory
 function isImageElement(target) {
   return target instanceof HTMLImageElement;
 }
-
+// self explanitory
 function getImageUrl(image) {
   return image.currentSrc || image.src || "";
 }
-
+// self explanitory
 function isUsableImage(target) {
   return isImageElement(target) && Boolean(getImageUrl(target));
 }
-
+//self explanitory, checks if a point is within the bounding rectangle of an element
 function isPointWithinRect(x, y, rect) {
   return x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom;
 }
 
+// Traverses the event's composed path to find an image element at the point of interaction, checking both the event target and any nested images within it, to determine if a long press should trigger an analysis request for that image.
 function findImageAtPoint(node, x, y) {
   if (isUsableImage(node) && isPointWithinRect(x, y, node.getBoundingClientRect())) {
     return node;
@@ -54,6 +60,7 @@ function findImageAtPoint(node, x, y) {
   return null;
 }
 
+// Uses the event's composed path to find the topmost image element at the point of interaction, which allows for accurate detection of long presses on images even when they are nested within other elements or have overlapping content.
 function getEventImage(event) {
   const path = typeof event.composedPath === "function"
     ? event.composedPath()
@@ -70,6 +77,7 @@ function getEventImage(event) {
   return null;
 }
 
+// Retrieves the bounding rectangle of the image element to provide context for the analysis request, including the position and size of the image as well as the viewport dimensions, which can be used by the server to optimize analysis or provide more relevant descriptions.
 function getImageCaptureArea(image) {
   const rect = image.getBoundingClientRect();
 
@@ -82,7 +90,7 @@ function getImageCaptureArea(image) {
     viewportHeight: window.innerHeight,
   };
 }
-
+// This is all AI generated, I swear. It adds a visual effect to indicate when an image analysis request has been triggered, by creating a temporary overlay with an expanding circle animation at the point of interaction. The effect is designed to be subtle and non-intrusive, while providing feedback to the user that their long press has been recognized and the analysis is underway.
 function ensureImpactLayer() {
   if (state.impactLayer?.isConnected) {
     return state.impactLayer;
@@ -196,7 +204,8 @@ function showRequestImpact(x, y) {
     impact.remove();
   }, REQUEST_IMPACT_DURATION_MS);
 }
-
+// End AI generated code
+// Handles the long press interaction on an image, sending a message to the background script to request analysis of the image URL, and then speaking the resulting description using the Web Speech API. It also includes error handling to catch any issues that arise during the process and log them to the console.
 async function analyzePressedImage(image) {
   try {
     const imageUrl = getImageUrl(image);
@@ -221,7 +230,7 @@ async function analyzePressedImage(image) {
     console.error("Analyze failed:", error);
   }
 }
-
+// self explanitory, clears the long press timer to prevent unintended analysis requests if the user releases the press or cancels it before the LONG_PRESS_MS threshold is reached.
 function clearLongPressTimer() {
   if (state.longPressTimer === null) {
     return;
@@ -230,15 +239,15 @@ function clearLongPressTimer() {
   clearTimeout(state.longPressTimer);
   state.longPressTimer = null;
 }
-
+// Arms the suppression of the default image UI for a short window, which is used to prevent the browser's context menu or other default interactions from interfering with the custom long press behavior when an analysis request has been triggered.
 function armDefaultUiSuppression() {
   state.suppressDefaultUiUntil = Date.now() + SUPPRESSION_WINDOW_MS;
 }
-
+// Determines whether the default image UI should be suppressed based on the current time and the suppression window, allowing the content script to conditionally prevent default interactions like context menus when a long press has recently triggered an analysis request.
 function shouldSuppressDefaultUi() {
   return Date.now() <= state.suppressDefaultUiUntil;
 }
-
+// Handles the pointer down event to detect long presses on images, initiating the analysis process and visual feedback when a long press is recognized, while also ensuring that normal taps and non-image interactions are not affected.
 function handlePointerDown(event) {
   state.suppressDefaultUiUntil = 0;
 
@@ -269,6 +278,7 @@ function handlePointerDown(event) {
   }, LONG_PRESS_MS);
 }
 
+// Handles click events to suppress the default image UI when a long press has triggered an analysis request, ensuring that the browser's context menu or other default interactions do not interfere with the custom behavior of the extension during the suppression window.
 function handleClick(event) {
   if (!shouldSuppressDefaultUi() || !getEventImage(event)) {
     return;
@@ -288,6 +298,7 @@ function handleContextMenu(event) {
   event.preventDefault();
 }
 
+//self explanitory, uses the Web Speech API to speak the provided text, selecting a preferred voice if available and configuring the speech parameters for a natural and clear narration of the image analysis results.
 function speak(text) {
   speechSynthesis.cancel();
 
