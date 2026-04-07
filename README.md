@@ -7,6 +7,27 @@ When a user long-presses an image on a page, the extension sends that image to t
 
 The backend also keeps a 1-hour SQLite cache so repeated scans of the same image can return quickly without making the same API call again.
 
+## manifest.json analysis
+
+{
+  "manifest_version": 3,
+  "name": "Server 3",
+  "version": "1.0",
+  "description": "Demo for project.",
+  "permissions": ["activeTab"], <-- we need active tab to capture screenshots when blob uploads fail, and to inject the content script that detects long-presses on images.
+  "host_permissions": ["<all_urls>"], <-- we need host permissions to allow the extension to fetch images from any URL for analysis, and to send requests to our backend server regardless of its address.>
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"]
+    }
+  ]
+}
+
+
 ## How It Works
 
 1. The content script detects a long-press on an image.
